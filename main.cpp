@@ -38,6 +38,18 @@ int main(int argc, char** argv)
     read_nicolete_file nicolete_reader = read_nicolete_file();
     read_nicolete_file::NiconeHeader niconeHeader = nicolete_reader.read_nicolete_header(file);
 
+    // calculate the file duration using sum of durations of all segments
+    double total_duration = 0;
+
+    for(unsigned long long i = 0; i < niconeHeader.segmentTimes.durations.size();i++){
+        total_duration += niconeHeader.segmentTimes.durations.at(i);
+    }
+
+    QTime n(0, 0, 0);                // n == 14:00:00
+    QTime t;
+    t = n.addSecs(total_duration);                // t == 14:01:10
+    qDebug() << t;
+
     // ===================================== Log ======================================================
 
     QFile log_file("nicolet_log.txt");

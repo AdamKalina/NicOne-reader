@@ -327,7 +327,7 @@ std::vector<QString> read_nicolete_file::readFileProperties(std::string sectionN
     //    for (const auto& i: strSetup)
     //        std::cout << i << std::endl;
 
-    for(unsigned long long i = 0; i < nrBstr*2; i ++){
+    for(unsigned long long i = 0; i < (nrBstr)*2; i ++){
         //std::cout << "loop no: " << i << std::endl;
         if ( i % 2 == 0 ){
             id = strSetup.at(i);
