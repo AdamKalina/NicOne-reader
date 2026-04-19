@@ -1,63 +1,64 @@
 #include <iostream>
 #include <fstream>
 #include <locale.h>
+#include <QFileInfo>
 #include "read_nicolete_file.h"
 
 int main(int argc, char** argv)
 {
-    //setlocale(LC_ALL, "cs_CZ.UTF-8");
     setlocale(LC_ALL, "czech");
+    
     std::string path;
+    bool exportSystem = true;
+    bool anonymize = false;
+    bool export2ascii = false;
 
-    //std::cout << argv[1] << std::endl;
+    if (argc < 2) {
+        std::cout << "Usage: Nicone <path> [--no-system] [--anonymize] [--ascii]" << std::endl;
+        return -1;
+    }
 
     path = argv[1];
+    QFileInfo infoSig(QString::fromLocal8Bit(path.c_str()));
 
-    //path = "D:\Dropbox\Scripts\Cpp\EEGLEnest\NicOne\7939\Patient20_NICONERECW_t1.e";
+    for (int i = 2; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--no-system") {
+            exportSystem = false;
+        }
+        if (arg == "--anonymize") {
+            anonymize = true;
+        }
+        if (arg == "--ascii") {
+            export2ascii = true;
+        }
+    }
 
     if(path.empty()){
         std::cout << "Nothing to do..." << std::endl;
         return -1;
     }
 
-    std::cout << path << std::endl;
+    std::cout << "Processing: " << path << std::endl;
+    if (!exportSystem) std::cout << "System annotations will be excluded." << std::endl;
+    if (anonymize) std::cout << "Patient information will be anonymized." << std::endl;
 
-    std::ifstream file(path, std::ios::binary);
+    read_nicolete_file nicolete_reader;
 
-    if (!file){
-        std::cout << "ERROR: Cannot open the file..." << std::endl;
-        return -1;
-    }
-
-
-    if (file.fail()){
-        std::cout << "ERROR: Cannot open the file..." << std::endl;
-        return -1;
-    }
-
-    read_nicolete_file nicolete_reader = read_nicolete_file();
-    read_nicolete_file::NiconeHeader niconeHeader = nicolete_reader.read_nicolete_header(file);
-
-    // calculate the file duration using sum of durations of all segments
-    double total_duration = 0;
-
-    for(unsigned long long i = 0; i < niconeHeader.segmentTimes.durations.size();i++){
-        total_duration += niconeHeader.segmentTimes.durations.at(i);
-    }
-
-    QTime n(0, 0, 0);                // n == 14:00:00
-    QTime t;
-    t = n.addSecs(total_duration);                // t == 14:01:10
-    qDebug() << t;
-
-    // ===================================== Log ======================================================
-
-    QFile log_file("nicolet_log.txt");
-    if(log_file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text))
-    {
-        QTextStream stream(&log_file);
-        stream << niconeHeader.patientInfo.at(1) + "|" + niconeHeader.patientInfo.at(2) + "|" + niconeHeader.patientInfo.at(3) + "|" + niconeHeader.studyInfo.at(3) + "|" + niconeHeader.segmentTimes.segmentStartTimes.at(0).toString("dd.MM.yyyy hh:mm:ss") + "|" + QString::fromStdString(path) +"\n";
-        log_file.close();
+    if (nicolete_reader.readNicOneFile(infoSig)) {
+        std::cout << "Error processing the file" << std::endl;
+        return 1;
+    } else {
+        std::string outputPath = path.substr(0, path.find_last_of(".")) + ".EDF";
+        std::cout << "Exporting to " << outputPath << "..." << std::endl;
+        QFileInfo infoEdf(QString::fromLocal8Bit(outputPath.c_str()));
+        if (nicolete_reader.exportToEdf(infoEdf, exportSystem, anonymize, export2ascii) == 0) {
+            std::cout << "Finished successfully!" << std::endl;
+            return 0;
+        } else {
+            std::cout << "Export failed!" << std::endl;
+            return 1;
+        }
     }
 
     return 0;

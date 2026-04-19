@@ -21,7 +21,19 @@ add_executable(Nicone
   read_nicolete_file.cpp
   ${TS_FILES}
 )
-target_link_libraries(Nicone Qt${QT_VERSION_MAJOR}::Core)
+
+
+add_subdirectory(../../EDFlib-AK/edflib/ ${CMAKE_CURRENT_BINARY_DIR}/build-edflib-Desktop_Qt_5_6_3_MSVC2013_32bit-Release)
+
+
+set_target_properties(Nicone PROPERTIES
+    AUTOMOC ON
+)
+
+target_link_libraries(Nicone PRIVATE
+    Qt${QT_VERSION_MAJOR}::Core
+    edflib
+)
 
 if(COMMAND qt_create_translation)
     qt_create_translation(QM_FILES ${CMAKE_SOURCE_DIR} ${TS_FILES})
