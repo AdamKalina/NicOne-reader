@@ -171,7 +171,9 @@ read_nicolete_file::NiconeHeader read_nicolete_file::read_nicolete_header(std::i
     readTSInfo();
     std::cout << "Extracted TSInfo for " << tsInfos.size() << " configurations." << std::endl;
     readMontage(file);
+    readEventDictionary(file);
     readAnnotationsInternal(file);
+    
     reconstructTimeline();
     std::cout << "Timeline reconstructed with " << timeline.size() << " segments." << std::endl;
 
@@ -358,6 +360,57 @@ void read_nicolete_file::readMontage(std::ifstream &file) {
 }
 
 /**
+ * @brief Parses the "EVENTTYPEINFOGUID" section to extract dictionary of predefined events, e.g. Eyes Open, Eyes Closed.
+ * This packet is located just before the "Events" stream, each block has 1152, but I am not sure by the offset, seems 640+96 bytes
+ */
+void read_nicolete_file::readEventDictionary(std::ifstream &file){
+    eventDictionary.clear();
+    auto it = std::find_if(sections.begin(), sections.end(), [](const Tag& v) { // first find the correct Tag
+        return v.IDStr == "EVENTTYPEINFOGUID";
+    });
+    if (it == sections.end()) return;
+
+    int mIdx = (int)it->index; // get the index from the Tag
+    auto idxIt = std::find_if(indices.begin(), indices.end(), [mIdx](const Index& v) { //find the correct row in indices where Tag.index = indices.sectionIdx (here 18)
+        return v.sectionIdx == (unsigned long long)mIdx;
+    });
+    if (idxIt == indices.end()) return;
+
+    file.seekg(idxIt->offset); // move the file reader to the position defined in indices.offset
+    // next guid is {B799F680-72A4-11D3-93D3-00500400C148}, should start at (idxIt->offset + idxIt->blockL) (here 262144)
+
+    // same pattern as in "DERIVATIONGUID"
+    file.seekg(40, std::ios::cur); // guid = 16 bytes + 8 bytes of max capacity (see lower) + 8 bytes empty
+    file.seekg(64, std::ios::cur); // empty
+    file.seekg(640, std::ios::cur); // empty
+
+    uint32_t active_blocks, max_blocks;
+    file.read(reinterpret_cast<char*>(&active_blocks), 4); // here 172 - number of blocks used
+    file.read(reinterpret_cast<char*>(&max_blocks),4); // here 337 - maximal number of blocks? eight bytes after guid are giving the number 388976 (total size of the chunk) and 388976/1152 = 337
+
+    // the annotations should start at offset + 752 bytes (40+64+640+8 = 752).
+
+    for (uint32_t i = 0; i < active_blocks; i++) {
+        std::vector<uint8_t> eGUID1(16); // Event specific GUID
+        std::vector<uint8_t> eGUID2(16); // Same for every event in dictionary
+        file.read(reinterpret_cast<char*>(eGUID1.data()), 16);
+        file.read(reinterpret_cast<char*>(eGUID2.data()), 16);
+        QString eGuidString1 = GetGuidFromBytes(eGUID1);
+        qDebug() << eGuidString1;
+        qDebug() << GetGuidFromBytes(eGUID2);
+        QString long_annot = readUint16toQString(256, file);
+        QString short_annot = readUint16toQString(67, file);
+        std::vector<QString> annots = {long_annot, short_annot};
+        qDebug() << long_annot;
+        file.seekg(474, std::ios::cur);
+        eventDictionary.insert({eGuidString1, annots});
+        qDebug() << "==================================";
+    }
+
+    // length of one whole block = 1152 bytes = 16+16+512+134+474
+}
+
+/**
  * @brief Parses the Events section to extract user annotations and system markers.
  * 
  * Nicolet stores events as a sequential list of packets in the "Events" stream.
@@ -377,13 +430,13 @@ void read_nicolete_file::readAnnotationsInternal(std::ifstream &file) {
     file.seekg(base);
 
     // Event packet header GUID
-    static const std::vector<uint8_t> ePktGUID = {0x80, 0xF6, 0x99, 0xB7, 0xA4, 0x72, 0xD3, 0x11, 0x93, 0xD3, 0x00, 0x50, 0x04, 0x00, 0xC1, 0x48};
+    static const std::vector<uint8_t> ePktGUID = {0x80, 0xF6, 0x99, 0xB7, 0xA4, 0x72, 0xD3, 0x11, 0x93, 0xD3, 0x00, 0x50, 0x04, 0x00, 0xC1, 0x48}; //"EVENTGUID" {B799F680-72A4-11D3-93D3-00500400C148}
     QDateTime epoch(QDate(1899, 12, 30), QTime(0, 0, 0));
 
     unsigned long long curOff = base;
     while (curOff + 272 <= base + totalL) {
         std::vector<uint8_t> pGUID(16);
-        if (!file.read(reinterpret_cast<char*>(pGUID.data()), 16) || pGUID != ePktGUID) break;
+        if (!file.read(reinterpret_cast<char*>(pGUID.data()), 16) || pGUID != ePktGUID) break; // this GUID is at the beggining of every packet for every annotation
         uint64_t pLen;
         file.read(reinterpret_cast<char*>(&pLen), 8);
         unsigned long long next = curOff + pLen;
@@ -409,18 +462,16 @@ void read_nicolete_file::readAnnotationsInternal(std::ifstream &file) {
         file.read(reinterpret_cast<char*>(&tLen), 8);
         std::vector<uint8_t> gM(16);
         file.read(reinterpret_cast<char*>(gM.data()), 16);
+
         // Non-mixed GUID for comparison
-        std::vector<uint8_t> gN{gM.at(3), gM.at(2), gM.at(1), gM.at(0), gM.at(5), gM.at(4), gM.at(7), gM.at(6), gM.at(8), gM.at(9), gM.at(10), gM.at(11), gM.at(12), gM.at(13), gM.at(14), gM.at(15)};
-        std::stringstream ss;
-        ss << "{";
-        for(int k=0; k<16; k++) {
-            ss << std::setfill('0') << std::setw(2) << std::uppercase << std::hex << (int)gN[k];
-            if(k==3 || k==5 || k==7 || k==9) ss << "-";
-        }
-        ss << "}";
-        QString eGUID = QString::fromStdString(ss.str());
+        QString eGUID = GetGuidFromBytes(gM);
 
         Annotation an; an.start = start; an.end = end; an.system = true;
+        
+        std::cout << "Event Found: GUID=" << eGUID.toStdString() 
+                  << " Start=" << start.toString("dd.MM.yyyy hh:mm:ss.zzz").toStdString() 
+                  << " Dur=" << dur << "s";
+
         // Check for specific Nicolet User/Seizure Event GUIDs
         if (eGUID == "{A5A95612-A7F8-11CF-831A-0800091B5BDA}" || eGUID == "{A5A95646-A7F8-11CF-831A-0800091B5BDA}") {
             an.system = false;
@@ -431,6 +482,7 @@ void read_nicolete_file::readAnnotationsInternal(std::ifstream &file) {
                 an.text = QString::fromWCharArray(reinterpret_cast<const wchar_t*>(tW.data()), (int)tLen).trimmed();
             }
             if (!uName.isEmpty() && !uName.contains("Nicolet", Qt::CaseInsensitive)) an.text = uName + ": " + an.text;
+            std::cout << " [USER] Text=\"" << an.text.toLocal8Bit().constData() << "\"";
         } else {
             // Standard Nicolet system event mapping
             static std::map<QString, QString> sMap = {
@@ -444,10 +496,20 @@ void read_nicolete_file::readAnnotationsInternal(std::ifstream &file) {
                 {"{A71A6DB5-4150-48BF-B462-1C40521EBD6F}", "Amplifier Disconnect"},
                 {"{6387C7C8-6F98-4886-9AF4-FA750ED300DE}", "Amplifier Reconnect"},
                 {"{71EECE80-EBC4-41C7-BF26-E56911426FB4}", "Recording Paused"},
-                {"{A5A95645-A7F8-11CF-831A-0800091B5BDA}", "ID_6_12HRS"}
+                {"{0541D3E6-5C1B-4F21-A5C5-FA41D3D19F44}", "ID_6_12HRS"},
+                {"{A5A95600-A7F8-11CF-831A-0800091B5BDA}", "Eyes Open"}, // by AK
+                {"{A5A95601-A7F8-11CF-831A-0800091B5BDA}", "Eyes Closed"}, // by AK
+                {"{A5A95611-A7F8-11CF-831A-0800091B5BDA}", "Fix Electrode"} // by AK
             };
-            if (sMap.count(eGUID)) an.text = sMap[eGUID];
+            if (sMap.count(eGUID)) {
+                an.text = sMap[eGUID];
+                std::cout << " [SYSTEM] Type=\"" << an.text.toStdString() << "\"";
+            } else {
+                std::cout << " [UNKNOWN SYSTEM]";
+            }
         }
+        std::cout << std::endl;
+
         if (!an.text.isEmpty()) annotations.push_back(an);
         curOff = next; file.seekg(curOff);
     }
@@ -546,6 +608,25 @@ std::string read_nicolete_file::formatGuid(const std::string& gS) {
     std::string u = gS; for (char &c : u) c = (char)toupper(c);
     return "{" + u.substr(0, 8) + "-" + u.substr(8, 4) + "-" + u.substr(12, 4) + "-" + u.substr(16,4) + "-" + u.substr(20,12) + "}";
 }
+
+QString read_nicolete_file::GetGuidFromBytes(std::vector<uint8_t> &GUID_mixed){
+
+    // Non-mixed GUID for comparison
+    std::vector<uint8_t> GUID_non_mixed{GUID_mixed.at(3), GUID_mixed.at(2), GUID_mixed.at(1), GUID_mixed.at(0), GUID_mixed.at(5), GUID_mixed.at(4), GUID_mixed.at(7), GUID_mixed.at(6), GUID_mixed.at(8), GUID_mixed.at(9), GUID_mixed.at(10), GUID_mixed.at(11), GUID_mixed.at(12), GUID_mixed.at(13), GUID_mixed.at(14), GUID_mixed.at(15)};
+
+    std::stringstream ss;
+    ss << "{";
+    for(int k=0; k<16; k++) {
+        ss << std::setfill('0') << std::setw(2) << std::uppercase << std::hex << (int)GUID_non_mixed[k];
+        if(k==3 || k==5 || k==7 || k==9) ss << "-";
+    }
+    ss << "}";
+
+    QString guidQString = QString::fromStdString(ss.str());
+    return guidQString;
+}
+
+
 
 /**
  * @brief Reads UTF-16 characters from file and returns a trimmed QString.

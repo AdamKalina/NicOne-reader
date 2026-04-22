@@ -114,6 +114,7 @@ public:
     std::vector<Annotation> annotations;
     std::vector<TimelineSection> timeline;
     std::vector<MontageEntry> montage;
+    std::map<QString, std::vector<QString>> eventDictionary;
     NiconeHeader niconeHeader;
     QFileInfo file_info;
 
@@ -132,9 +133,10 @@ public:
     void readTSInfo();
     void readAnnotationsInternal(std::ifstream &file);
     void readMontage(std::ifstream &file);
+    void readEventDictionary(std::ifstream &file);
     void reconstructTimeline();
     int exportToEdf(QFileInfo infoEdf, bool exportSystemAnnotations = true, bool anonymize = false, bool export2ascii = false);
-
+    QString GetGuidFromBytes(std::vector<uint8_t> &GUID);
 private:
     std::vector<int> birthDateFromID(std::string id);
 };
