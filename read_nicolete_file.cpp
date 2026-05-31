@@ -806,6 +806,16 @@ int read_nicolete_file::exportToEdf(QFileInfo infoEdf, bool exportSystemAnnotati
                     label = me.derivationName; break;
                 }
             }
+
+            // EDF Specification requires channel type prefixes
+            QString upperLabel = label.toUpper().trimmed();
+            if (!upperLabel.startsWith("EEG ") && !upperLabel.startsWith("ECG ")) {
+                if (upperLabel.contains("ECG") || upperLabel.contains("EKG")) {
+                    label = "ECG " + label;
+                } else {
+                    label = "EEG " + label;
+                }
+            }
             edf_set_samplefrequency(hdl, ch, (int)std::round(ci.dSamplingRate));
             edf_set_label(hdl, ch, label.toLocal8Bit().constData());
             edf_set_physical_dimension(hdl, ch, "uV");
