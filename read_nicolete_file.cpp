@@ -8,9 +8,9 @@ read_nicolete_file::read_nicolete_file()
 
 /**
  * @brief Main entry point for parsing the Nicolet (.e) file header and metadata.
- * 
+ *
  * Nicolet files are proprietary containers. They start with a tag list that defines
- * logical streams (Data, Segments, Events, etc.). This function identifies those 
+ * logical streams (Data, Segments, Events, etc.). This function identifies those
  * streams and builds a global index of file offsets and block lengths.
  */
 read_nicolete_file::NiconeHeader read_nicolete_file::read_nicolete_header(std::ifstream &file){
@@ -173,6 +173,11 @@ read_nicolete_file::NiconeHeader read_nicolete_file::read_nicolete_header(std::i
     readMontage(file);
     readEventDictionary(file);
     readAnnotationsInternal(file);
+    readVideoAnnotations(file);
+
+    std::sort(annotations.begin(), annotations.end(), [](const Annotation& a, const Annotation& b) {
+        return a.start < b.start;
+    });
     
     reconstructTimeline();
     std::cout << "Timeline reconstructed with " << timeline.size() << " segments." << std::endl;
@@ -182,7 +187,7 @@ read_nicolete_file::NiconeHeader read_nicolete_file::read_nicolete_header(std::i
 
 /**
  * @brief Parses the InfoChangeStream to extract dynamic metadata packets.
- * 
+ *
  * Nicolet files store changes in configuration (montage, sensors, sampling rates)
  * as "packets" in a specific stream. Each packet has a GUID indicating its type.
  */
@@ -210,9 +215,9 @@ void read_nicolete_file::readDynamicPackets(std::ifstream &file) {
         file.read(reinterpret_cast<char*>(guidMixed.data()), 16);
         // Correcting GUID byte order for display
         std::vector<uint8_t> guidNonMixed{guidMixed.at(3), guidMixed.at(2), guidMixed.at(1), guidMixed.at(0),
-                                          guidMixed.at(5), guidMixed.at(4), guidMixed.at(7), guidMixed.at(6),
-                                          guidMixed.at(8), guidMixed.at(9), guidMixed.at(10), guidMixed.at(11),
-                                          guidMixed.at(12), guidMixed.at(13), guidMixed.at(14), guidMixed.at(15)};
+                    guidMixed.at(5), guidMixed.at(4), guidMixed.at(7), guidMixed.at(6),
+                    guidMixed.at(8), guidMixed.at(9), guidMixed.at(10), guidMixed.at(11),
+                    guidMixed.at(12), guidMixed.at(13), guidMixed.at(14), guidMixed.at(15)};
         std::stringstream ss;
         for (uint8_t v : guidNonMixed) ss << std::setfill('0') << std::setw(2) << std::hex << (int)v;
         pkt.guid = ss.str();
@@ -258,7 +263,7 @@ void read_nicolete_file::readDynamicPackets(std::ifstream &file) {
 
 /**
  * @brief Parses TimeSeries (TS) information from dynamic packets.
- * 
+ *
  * This identifies the mapping between amplifier sensors and digital data streams,
  * as well as critical values like sampling rates and resolution.
  */
@@ -321,7 +326,7 @@ void read_nicolete_file::readTSInfo() {
 
 /**
  * @brief Parses Montage/Derivation information.
- * 
+ *
  * Explains which sensors are combined (e.g. Fp1-A1) to form a display derivation.
  */
 void read_nicolete_file::readMontage(std::ifstream &file) {
@@ -361,7 +366,8 @@ void read_nicolete_file::readMontage(std::ifstream &file) {
 
 /**
  * @brief Parses the "EVENTTYPEINFOGUID" section to extract dictionary of predefined events, e.g. Eyes Open, Eyes Closed.
- * This packet is located just before the "Events" stream, each block has 1152, but I am not sure by the offset, seems 640+96 bytes
+ * This packet is located just before the "Events" stream, there is 752 bytes buffer with some info, than every block has 1152 bytes
+ * Every block consist of event specific GUID, another GUID common for every event in dictionary, then long and short version of the same event label
  */
 void read_nicolete_file::readEventDictionary(std::ifstream &file){
     eventDictionary.clear();
@@ -396,25 +402,27 @@ void read_nicolete_file::readEventDictionary(std::ifstream &file){
         file.read(reinterpret_cast<char*>(eGUID1.data()), 16);
         file.read(reinterpret_cast<char*>(eGUID2.data()), 16);
         QString eGuidString1 = GetGuidFromBytes(eGUID1);
-        qDebug() << eGuidString1;
-        qDebug() << GetGuidFromBytes(eGUID2);
+        //qDebug() << eGuidString1;
+        //qDebug() << GetGuidFromBytes(eGUID2);
         QString long_annot = readUint16toQString(256, file);
         QString short_annot = readUint16toQString(67, file);
         std::vector<QString> annots = {long_annot, short_annot};
-        qDebug() << long_annot;
+        //qDebug() << long_annot;
+        //qDebug() << short_annot;
         file.seekg(474, std::ios::cur);
         eventDictionary.insert({eGuidString1, annots});
-        qDebug() << "==================================";
+        //qDebug() << "==================================";
     }
 
     // length of one whole block = 1152 bytes = 16+16+512+134+474
 }
 
 /**
- * @brief Parses the Events section to extract user annotations and system markers.
- * 
+ * @brief Parses the "Events" section to extract user annotations and system markers.
+ *
  * Nicolet stores events as a sequential list of packets in the "Events" stream.
  * Each packet contains a GUID, start/end OLE Automation dates, and optionally text.
+ * Improved by Adam Kalina 4/2026 - reading additional data from dictionary defined events, fixing bug where zero terminated string would not concat
  */
 void read_nicolete_file::readAnnotationsInternal(std::ifstream &file) {
     annotations.clear();
@@ -438,80 +446,154 @@ void read_nicolete_file::readAnnotationsInternal(std::ifstream &file) {
         std::vector<uint8_t> pGUID(16);
         if (!file.read(reinterpret_cast<char*>(pGUID.data()), 16) || pGUID != ePktGUID) break; // this GUID is at the beggining of every packet for every annotation
         uint64_t pLen;
-        file.read(reinterpret_cast<char*>(&pLen), 8);
-        unsigned long long next = curOff + pLen;
+        file.read(reinterpret_cast<char*>(&pLen), 8); //len of current event
+        unsigned long long next = curOff + pLen; // beginning of the next event
 
         file.seekg(8, std::ios::cur); // Skip internal event ID
         double eDate, eFrac;
-        file.read(reinterpret_cast<char*>(&eDate), 8);
+        file.read(reinterpret_cast<char*>(&eDate), 8); //OLE 2.0 DateTime
         file.read(reinterpret_cast<char*>(&eFrac), 8);
         // Converting OLE double (days since 1899) to millisecond precision
         QDateTime start = epoch.addMSecs((long long)(eDate * 86400000.0 + eFrac * 1000.0));
         if (start.isDaylightTime()) start = start.addSecs(-3600);
 
-        double dur;
-        file.read(reinterpret_cast<char*>(&dur), 8);
-        QDateTime end = start.addMSecs(dur * 1000.0);
+        double duration;
+        file.read(reinterpret_cast<char*>(&duration), 8);
+        QDateTime end = start.addMSecs(duration * 1000.0);
 
         file.seekg(48, std::ios::cur); // Skip to user info
-        std::vector<uint16_t> uW(12);
-        file.read(reinterpret_cast<char*>(uW.data()), 24);
-        QString uName = QString::fromWCharArray(reinterpret_cast<const wchar_t*>(uW.data()), 12).trimmed();
-        
-        uint64_t tLen;
-        file.read(reinterpret_cast<char*>(&tLen), 8);
+        QString userName = readUint16toQString(12,file);
+
+        uint64_t eventStringLen;
+        file.read(reinterpret_cast<char*>(&eventStringLen), 8); // read 8 bytes that present the length of event string (including trailing nulls)
         std::vector<uint8_t> gM(16);
-        file.read(reinterpret_cast<char*>(gM.data()), 16);
+        file.read(reinterpret_cast<char*>(gM.data()), 16); // read GUID - determines if event is in dictionary or user defined
 
         // Non-mixed GUID for comparison
         QString eGUID = GetGuidFromBytes(gM);
 
-        Annotation an; an.start = start; an.end = end; an.system = true;
+        Annotation an; an.start = start; an.end = end; an.system = false;
         
-        std::cout << "Event Found: GUID=" << eGUID.toStdString() 
-                  << " Start=" << start.toString("dd.MM.yyyy hh:mm:ss.zzz").toStdString() 
-                  << " Dur=" << dur << "s";
+        std::cout << "Event Found: GUID=" << eGUID.toStdString() << " Start=" << start.toString("dd.MM.yyyy hh:mm:ss.zzz").toStdString() << " Duration=" << duration << "s";
 
         // Check for specific Nicolet User/Seizure Event GUIDs
-        if (eGUID == "{A5A95612-A7F8-11CF-831A-0800091B5BDA}" || eGUID == "{A5A95646-A7F8-11CF-831A-0800091B5BDA}") {
+        if (eGUID == "{A5A95612-A7F8-11CF-831A-0800091B5BDA}" || eGUID == "{A5A95646-A7F8-11CF-831A-0800091B5BDA}"){
+
             an.system = false;
             file.seekg(80 + 32, std::ios::cur); // skip Reserved4 + Label + Reserved5
-            if (tLen > 0 && tLen < 10000) {
-                std::vector<uint16_t> tW(tLen);
-                file.read(reinterpret_cast<char*>(tW.data()), tLen * 2);
-                an.text = QString::fromWCharArray(reinterpret_cast<const wchar_t*>(tW.data()), (int)tLen).trimmed();
+            if (eventStringLen > 0 && eventStringLen < 10000){
+                an.text = readUint16toQString(int(eventStringLen),file);
             }
-            if (!uName.isEmpty() && !uName.contains("Nicolet", Qt::CaseInsensitive)) an.text = uName + ": " + an.text;
+            if (!userName.isEmpty() && !userName.contains("Nicolet", Qt::CaseInsensitive)){
+                an.text = userName + ": " + an.text;
+            }
             std::cout << " [USER] Text=\"" << an.text.toLocal8Bit().constData() << "\"";
-        } else {
-            // Standard Nicolet system event mapping
-            static std::map<QString, QString> sMap = {
-                {"{08784382-C765-11D3-90CE-00104B6F4F70}", "Format change"},
-                {"{6FF394DA-D1B8-46DA-B78F-866C67CF02AF}", "Photic"},
-                {"{481DFC97-013C-4BC5-A203-871B0375A519}", "Posthyperventilation"},
-                {"{725798BF-CD1C-4909-B793-6C7864C27AB7}", "Review progress"},
-                {"{96315D79-5C24-4A65-B334-E31A95088D55}", "Exam start"},
-                {"{A5A95608-A7F8-11CF-831A-0800091B5BDA}", "Hyperventilation"},
-                {"{A5A95617-A7F8-11CF-831A-0800091B5BDA}", "Impedance"},
-                {"{A71A6DB5-4150-48BF-B462-1C40521EBD6F}", "Amplifier Disconnect"},
-                {"{6387C7C8-6F98-4886-9AF4-FA750ED300DE}", "Amplifier Reconnect"},
-                {"{71EECE80-EBC4-41C7-BF26-E56911426FB4}", "Recording Paused"},
-                {"{0541D3E6-5C1B-4F21-A5C5-FA41D3D19F44}", "ID_6_12HRS"},
-                {"{A5A95600-A7F8-11CF-831A-0800091B5BDA}", "Eyes Open"}, // by AK
-                {"{A5A95601-A7F8-11CF-831A-0800091B5BDA}", "Eyes Closed"}, // by AK
-                {"{A5A95611-A7F8-11CF-831A-0800091B5BDA}", "Fix Electrode"} // by AK
-            };
-            if (sMap.count(eGUID)) {
-                an.text = sMap[eGUID];
-                std::cout << " [SYSTEM] Type=\"" << an.text.toStdString() << "\"";
+        } else { // Standard Nicolet system event mapping - use the dictionary
+
+            // There is more data to read even in dictionary defined events
+            // So far 152 bytes were read since the eventguid -> pLen - 152 remains
+            file.seekg(16,std::ios::cur); // first 16 are empty
+            //QString aChannel = readUint16toQString(48,file); // this is probably the channel associated with the event, seems to occupy 96 bytes
+            file.seekg(96,std::ios::cur); // aChannel not used - skipping
+            QString addInfo = readUint16toQString((pLen-152-48)/2,file); // user note on dictionary defined event, e.g. Spike - ?, in system events verbose info on reamining recording space and TCP ping
+
+
+            // Use the dictionary
+            if (eventDictionary.count(eGUID)) {
+
+                an.text = eventDictionary[eGUID].at(0); // use the long version
+
+                if (an.text == ""){
+                    an.text = eventDictionary[eGUID].at(1); // when the long version is not defined, use the short one
+                }
+
+                if (an.text == "Hawk_Cmd_Log"){ // Hawk_Cmd_Log = store event? Triggered every 10 seconds - mark it as system event
+                    an.system = true;
+                }
+
+                if (!an.system){
+                    if (addInfo != ""){
+                        an.text = an.text + " - " + addInfo; // append the additional info only on non-system events
+                    }
+                }
+
+                std::cout << " " << an.text.toStdString() << "\"";
             } else {
-                std::cout << " [UNKNOWN SYSTEM]";
+                std::cout << " [UNKNOWN SYSTEM EVENT]";
             }
         }
         std::cout << std::endl;
 
-        if (!an.text.isEmpty()) annotations.push_back(an);
-        curOff = next; file.seekg(curOff);
+        if (!an.text.isEmpty()){
+            annotations.push_back(an);
+        }
+        curOff = next;
+        file.seekg(curOff);
+    }
+}
+
+/**
+ * @brief Parses the "VIDEOSYNCGUID" section to extract video file mapping timestamps.
+ *
+ * Nicolet maps 15-minute video chunks directly to the EEG timeline.
+ * The structure stores OLE date doubles followed by a UTF-16 filename.
+ */
+void read_nicolete_file::readVideoAnnotations(std::ifstream &file) {
+    auto it = std::find_if(sections.begin(), sections.end(), [](const Tag& v) {
+        return v.IDStr == "VIDEOSYNCGUID" || v.IDStr == "{E11C4CBA-0753-4655-A1E9-2B2309D1545B}";
+    });
+    if (it == sections.end()) return;
+
+    int vIdx = (int)it->index;
+    for (const auto& idx : indices) {
+        if (idx.sectionIdx == (unsigned long long)vIdx) {
+            file.seekg(idx.offset);
+            std::vector<uint8_t> data(idx.sectionL);
+            if (!file.read(reinterpret_cast<char*>(data.data()), idx.sectionL)) continue;
+
+            const uint8_t aviPattern[] = {0x2E, 0x00, 0x61, 0x00, 0x76, 0x00, 0x69, 0x00}; // ".avi" in UTF-16
+            auto searchIt = data.begin();
+            QDateTime epoch(QDate(1899, 12, 30), QTime(0, 0, 0));
+            QString lastVideoFilename = "";
+
+            while ((searchIt = std::search(searchIt, data.end(), std::begin(aviPattern), std::end(aviPattern))) != data.end()) {
+                size_t pos = std::distance(data.begin(), searchIt);
+                
+                size_t strStart = pos;
+                // Backtrack over UTF-16 ASCII characters (high byte is 0, low byte is printable)
+                while (strStart >= 2 && data[strStart - 1] == 0 && data[strStart - 2] >= 0x20 && data[strStart - 2] < 0x7F) {
+                    strStart -= 2;
+                }
+                
+                if (strStart >= 16) {
+                    double eDate, eFrac;
+                    std::memcpy(&eDate, &data[strStart - 16], 8);
+                    std::memcpy(&eFrac, &data[strStart - 8], 8);
+                    
+                    if (eDate > 10000.0 && eDate < 100000.0) { // basic validity check for typical OLE dates (1927-2173)
+                        size_t lenBytes = pos + 8 - strStart;
+                        std::vector<wchar_t> wName(lenBytes / 2);
+                        std::memcpy(wName.data(), &data[strStart], lenBytes);
+                        QString filename = QString::fromWCharArray(wName.data(), lenBytes / 2);
+                        
+                        if (filename != lastVideoFilename) {
+                            lastVideoFilename = filename;
+                            
+                            Annotation an;
+                            an.start = epoch.addMSecs((long long)(eDate * 86400000.0 + eFrac * 1000.0));
+                            if (an.start.isDaylightTime()) an.start = an.start.addSecs(-3600);
+                            an.end = an.start;
+                            an.system = true;
+                            an.text = "Video file: " + filename;
+                            annotations.push_back(an);
+                            
+                            std::cout << "Video Annotation Added: " << filename.toLocal8Bit().constData() << " Start=" << an.start.toString("dd.MM.yyyy hh:mm:ss.zzz").toStdString() << std::endl;
+                        }
+                    }
+                }
+                searchIt += 8;
+            }
+        }
     }
 }
 
@@ -652,7 +734,7 @@ int read_nicolete_file::readNicOneFile(QFileInfo info) {
 
 /**
  * @brief Exports the demultiplexed EEG signal data and annotations to EDF+ format.
- * 
+ *
  * Logic Overview:
  * 1. For each continuous recording segment in the file, a separate EDF part is created.
  * 2. It performs "Chunked In-Memory" reading: instead of thousands of disk seeks, it reads large
@@ -693,9 +775,9 @@ int read_nicolete_file::exportToEdf(QFileInfo infoEdf, bool exportSystemAnnotati
         const auto& channels = tsInfos[sec.tsInfoIdx];
         std::string oP = infoEdf.absoluteFilePath().toStdString();
         // Append part number if there are multiple segments
-        if (timeline.size() > 1) { 
-            size_t dot = oP.find_last_of("."); 
-            if (dot != std::string::npos) oP.insert(dot, "_part_" + std::to_string(i + 1)); 
+        if (timeline.size() > 1) {
+            size_t dot = oP.find_last_of(".");
+            if (dot != std::string::npos) oP.insert(dot, "_part_" + std::to_string(i + 1));
             else oP += "_part_" + std::to_string(i + 1);
         }
 

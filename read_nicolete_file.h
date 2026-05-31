@@ -132,6 +132,7 @@ public:
     void readDynamicPackets(std::ifstream &file);
     void readTSInfo();
     void readAnnotationsInternal(std::ifstream &file);
+    void readVideoAnnotations(std::ifstream &file);
     void readMontage(std::ifstream &file);
     void readEventDictionary(std::ifstream &file);
     void reconstructTimeline();
