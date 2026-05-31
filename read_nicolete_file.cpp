@@ -751,9 +751,9 @@ int read_nicolete_file::exportToEdf(QFileInfo infoEdf, bool exportSystemAnnotati
     std::string fN, pC; std::vector<int> bD;
     if (anonymize) { fN = "Anonymous"; pC = "X"; bD = {1901, 1, 1}; }
     else {
-        // Patient fields: [2] is Surname, [1] is First Name, [3] is personal ID
-        fN = (niconeHeader.patientInfo.size() >= 4) ? (niconeHeader.patientInfo[2] + " " + niconeHeader.patientInfo[1]).toLocal8Bit().constData() : "Unknown";
-        pC = (niconeHeader.patientInfo.size() >= 4) ? niconeHeader.patientInfo[3].toStdString() : "X";
+        // Patient fields: [4] is Surname, [2] is First Name, [5] is personal ID
+        fN = (niconeHeader.patientInfo.size() >= 4) ? (niconeHeader.patientInfo[4] + " " + niconeHeader.patientInfo[2]).toLocal8Bit().constData() : "Unknown";
+        pC = (niconeHeader.patientInfo.size() >= 4) ? niconeHeader.patientInfo[5].toStdString() : "X";
         bD = birthDateFromID(pC);
         std::cout << "patientCode: " << pC << std::endl;
     }
