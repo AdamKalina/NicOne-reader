@@ -1,10 +1,18 @@
 #include "read_nicolete_file.h"
+#include "edflib.h"
 
 read_nicolete_file::read_nicolete_file()
 {
 
 }
 
+/**
+ * @brief Main entry point for parsing the Nicolet (.e) file header and metadata.
+ *
+ * Nicolet files are proprietary containers. They start with a tag list that defines
+ * logical streams (Data, Segments, Events, etc.). This function identifies those
+ * streams and builds a global index of file offsets and block lengths.
+ */
 read_nicolete_file::NiconeHeader read_nicolete_file::read_nicolete_header(std::ifstream &file){
 
     std::map<std::string, std::string> guids;
@@ -46,52 +54,39 @@ read_nicolete_file::NiconeHeader read_nicolete_file::read_nicolete_header(std::i
     guids["{7842FEF5-A686-459D-8196-769FC0AD99B3}"] = "DOCUMENTINFOGUID";
     guids["{BCDAEE87-2496-4DF4-B07C-8B4E31E3C495}"] = "USERSINFOGUID";
     guids["{B799F680-72A4-11D3-93D3-00500400C148}"] = "EVENTGUID";
-    guids["{AF2B3281-7FCE-11D2-B2DE-00104B6FC652}"] = "SHORTSAMPLESGUID";
+    guids["{AF2B3281-7FCE-11D2-B2DE-00104B6F4F70}"] = "SHORTSAMPLESGUID";
     guids["{89A091B3-972E-4DA2-9266-261B186302A9}"] = "DELAYLINESAMPLESGUID";
     guids["{291E2381-B3B4-44D1-BB77-8CF5C24420D7}"] = "GENERALSAMPLESGUID";
     guids["{5F11C628-FCCC-4FDD-B429-5EC94CB3AFEB}"] = "FILTERSAMPLESGUID";
     guids["{728087F8-73E1-44D1-8882-C770976478A2}"] = "DATEXDATAGUID";
     guids["{35F356D9-0F1C-4DFE-8286-D3DB3346FD75}"] = "TESTINFOGUID";
 
-    std::map<std::string, std::string> dynamic_guids;
-    dynamic_guids["BF7C95EF6C3B4E709E11779BFFF58EA7"] = "CHANNELGUID";
-    dynamic_guids["8A19AA48BEA040D5B89F667FC578D635"] = "DERIVATIONGUID";
-    dynamic_guids["F824D60C995E4D949578893C755ECB99"] = "FILTERGUID";
-    dynamic_guids["0295036135BB4A229F0BC78AAA5DB094"] = "DISPLAYGUID";
-    dynamic_guids["782B34E88E514BB997013227BB882A23"] = "ACCINFOGUID";
-    dynamic_guids["A271CCCB515D4590B6A1DC170C8D6EE2"] = "TSGUID";
-    dynamic_guids["D01B34A09DBD11D393D300500400C148"] = "AUDIOINFOGUID";
-
-    std::vector<unsigned long> misc1(5);
+    std::vector<unsigned long> misc1(5); // unsigned long = 4 bytes
     unsigned long unknown;
     unsigned long indexIdx;
     unsigned long nrTags;
     unsigned long tag_index;
-    std::string tag;
 
     // Get init
-    file.read(reinterpret_cast<char*>(misc1.data()), 5 * sizeof(unsigned long)); //#ok<NASGU>
-    file.read(reinterpret_cast<char *>(&unknown), sizeof(unknown)); //#ok<NASGU>
+    file.read(reinterpret_cast<char*>(misc1.data()), 5 * sizeof(unsigned long));
+    file.read(reinterpret_cast<char *>(&unknown), sizeof(unknown));
     file.read(reinterpret_cast<char *>(&indexIdx), sizeof(indexIdx));
 
-    //std::cout << misc1.at(0) << " "<< misc1.at(1) << " "<< misc1.at(2) << " "<< misc1.at(3) << " "<< misc1.at(4) << " "<< unknown << " " << indexIdx << std::endl;
+    if(misc1.at(0) != 477872911){ //hopefully this is the same at the beginning of each file
+        qDebug() << "not valid Nicolet EEG .e file";
+        return NiconeHeader();
+    }
 
     // Get TAGS structure and Channel IDS
     file.seekg(172); // fseek(h, 172,'bof');
     file.read(reinterpret_cast<char *>(&nrTags), sizeof(nrTags));
-    //std::cout << "nrTags: " << nrTags << std::endl;
-    //std::cout << file.tellg() << std::endl;
 
+    sections.clear();
     for(int j = 0; j < int(nrTags); j++){
         Tag tag_struct;
-        //        for(int i = 0; i < 80; i ++){ // like reading 40*int
-        //            file.read(reinterpret_cast<char *>(&t), sizeof(t));
-        //            tag += t;
-        //        }
-
         // Read 40 uint16 values from the file
-        std::vector<uint16_t> uint16Values(40);
-        file.read(reinterpret_cast<char*>(uint16Values.data()), 40 * sizeof(uint16_t));
+        std::vector<unsigned short> uint16Values(40);
+        file.read(reinterpret_cast<char*>(uint16Values.data()), 40 * sizeof(unsigned short));
 
         // Convert uint16 values to characters
         std::vector<char> charValues(uint16Values.begin(), uint16Values.end());
@@ -103,36 +98,22 @@ read_nicolete_file::NiconeHeader read_nicolete_file::read_nicolete_header(std::i
 
         // Convert char values to std::string
         std::string tag(charValues.begin(), charValues.end());
-
         tag.erase(std::find(tag.begin(), tag.end(), '\0'), tag.end());
 
         file.read(reinterpret_cast<char *>(&tag_index), sizeof(tag_index));
         tag_struct.index = tag_index;
         tag_struct.tag = tag;
-        if (guids.find(tag) == guids.end()){
-            //std::cout << "not found" << std::endl;
-
-            if (is_digits(tag)){
-                //std::cout << "is digits" << std::endl;
-                tag_struct.IDStr = tag;
-            }
-            else{
-                tag_struct.IDStr = "UNKNOWN";
-            }
-        }
-        else{
+        if (guids.count(tag)){
             tag_struct.IDStr = guids[tag];
+        } else {
+            if (is_digits(tag)) tag_struct.IDStr = tag; // IDStr is the channel index as a string
+            else tag_struct.IDStr = "UNKNOWN";
         }
         sections.push_back(tag_struct);
-        //        std::cout <<  "tag: " << tag_struct.tag << std::endl;
-        //        std::cout << "tag_index: " << tag_struct.index << std::endl;
-        //        std::cout << "IDStr: " << tag_struct.IDStr << std::endl;
-        //        std::cout << "-------------------------------" << std::endl;
     }
 
     // QI index
     file.seekg(172208);
-    unsigned long fidx;
     Qi qi;
     file.read(reinterpret_cast<char *>(&qi.nrEntries), sizeof(qi.nrEntries));
     file.read(reinterpret_cast<char *>(&qi.misc1), sizeof(qi.misc1));
@@ -141,309 +122,952 @@ read_nicolete_file::NiconeHeader read_nicolete_file::read_nicolete_header(std::i
     file.read(reinterpret_cast<char *>(&qi.LQi), sizeof(qi.LQi));
 
     for(int i = 0; i < 2*int(nrTags); i++){
+        unsigned long fidx;
         file.read(reinterpret_cast<char *>(&fidx), sizeof(fidx));
-        if (fidx != 0){
-            qi.firstIdx.push_back(fidx);
-        }
-
+        if (fidx != 0) qi.firstIdx.push_back(fidx);
     }
-
-    //std::cout << "nrEntries: "<< qi.nrEntries << " misc1: " << qi.misc1 << " indexIdx: " << qi.indexIdx << " misc3: "<< qi.misc3 << " LQi: " << qi.LQi << std::endl;
-    // for (const auto& i: qi.firstIdx)
-    //     std::cout << i << std::endl;
-
 
     // ================================ Get Main Index ===============================================
     // Index consists of multiple blocks, after each block is the pointer to the next block. Total number of entries is in obj.Qi.nrEntries
-
     int curIdx = 0;
     unsigned long long nextIndexPointer = indexIdx;
-    unsigned long long nrIdx;
-
-    indices.reserve(int(qi.nrEntries)); // Preallocate indices
+    indices.clear();
+    indices.reserve(int(qi.nrEntries));
 
     while (curIdx < int(qi.nrEntries)){
-        //std::cout << "curIdx: " << curIdx << std::endl;
         file.seekg(nextIndexPointer);
+        unsigned long long nrIdx;
         file.read(reinterpret_cast<char *>(&nrIdx), sizeof(nrIdx));
-        //std::cout << "nrIdx: " << nrIdx << std::endl;
-
+        
         // Read nrIdx*3 uint64 values from the file
-        std::vector<uint64_t> var(3*nrIdx); // preallocate it to 3* nrIdx // // tady vznik� probl�m, kdy� tam nab�hne moc velk� ��slo, nap�. 18239012444179594585
-        file.read(reinterpret_cast<char*>(var.data()), 3 * nrIdx * sizeof(uint64_t));
-
-        //std::cout << "after reading data: " << file.tellg() << std::endl;
-
-        //std::cout << "var size: "<< var.size() << std::endl;
-        //for (const auto& i: var)
-        //  std::cout << i << std::endl;
-        //std::cout << "make the index" << std::endl;
+        std::vector<unsigned long long> var(3*nrIdx);
+        file.read(reinterpret_cast<char*>(var.data()), 3 * nrIdx * sizeof(unsigned long long));
 
         for (unsigned long long i = 0; i < nrIdx; i++){
             Index index;
-            index.sectionIdx = var.at(3*i); // 0,3,6,9
-            index.offset = var.at(3*i+1); // 1,4,7,10
-            index.blockL = var.at(3*i+2) % 4294967296; // 4294967296 = 2^32 // 2,5,8,10
-            index.sectionL = round(var.at(3*i+2)/4294967296); // or you can use static_cast<unsigned long long>(pow(2,32))
-            //std::cout << "sectionIdx: "<< index.sectionIdx << " offset: " << index.offset << " blockL: " << index.blockL << " sectionL: "<< index.sectionL << std::endl;
+            index.sectionIdx = var.at(3*i); // ID of the stream (e.g. "0" for channel 0 data)
+            index.offset = var.at(3*i+1); // Absolute file offset
+            index.blockL = var.at(3*i+2) % 4294967296ULL; // 4294967296 = 2^32
+            index.sectionL = var.at(3*i+2) / 4294967296ULL;
             indices.push_back(index);
         }
-        file.read(reinterpret_cast<char *>(&nextIndexPointer), sizeof(nextIndexPointer)); // 49 168 chars apart
-        //std::cout << "nextIndexPointer: " << nextIndexPointer << std::endl;
-        curIdx = curIdx + nrIdx;
-
-        if(nextIndexPointer == 0){
-            break;
-        }
+        file.read(reinterpret_cast<char *>(&nextIndexPointer), sizeof(nextIndexPointer));
+        curIdx += (int)nrIdx;
+        if(nextIndexPointer == 0) break;
     }
 
-    // read the actual data
+    // ===================================== Metadata Extraction =====================================================
+    NiconeHeader nHeader;
+    nHeader.patientInfo = readFileProperties("PATIENTINFOGUID", file);
+    nHeader.studyInfo = readFileProperties("STUDYINFOGUID", file);
+    nHeader.segmentTimes = readSegmentStartTimes(file);
+    nHeader.duration = 0;
+    for(double d : nHeader.segmentTimes.durations) nHeader.duration += d;
 
-    NiconeHeader niconeHeader;
+    this->niconeHeader = nHeader;
+    std::cout << "Detected " << nHeader.segmentTimes.durations.size() << " segments." << std::endl;
 
-    // ===================================== Get PatientGUID =====================================================
+    readDynamicPackets(file);
+    readTSInfo();
+    std::cout << "Extracted TSInfo for " << tsInfos.size() << " configurations." << std::endl;
+    readMontage(file);
+    readEventDictionary(file);
+    readAnnotationsInternal(file);
+    readVideoAnnotations(file);
 
-    niconeHeader.patientInfo = readFileProperties("PATIENTINFOGUID",file);
+    std::sort(annotations.begin(), annotations.end(), [](const Annotation& a, const Annotation& b) {
+        return a.start < b.start;
+    });
+    
+    reconstructTimeline();
+    std::cout << "Timeline reconstructed with " << timeline.size() << " segments." << std::endl;
 
-    // ===================================== Get FileInfo =====================================================
-
-    niconeHeader.studyInfo = readFileProperties("STUDYINFOGUID",file);
-
-    // ===================================== Get Segment Start Times =====================================================
-
-    niconeHeader.segmentTimes = readSegmentStartTimes(file);
-
-//    for (int i = 0; i < 200; i++){
-//        std::cout << i << " sectionIdx: "<< indices.at(i).sectionIdx << " offset: " << indices.at(i).offset << " blockL: " << indices.at(i).blockL << " sectionL: "<< indices.at(i).sectionL << std::endl;
-//    }
-
-    return niconeHeader;
+    return nHeader;
 }
 
+/**
+ * @brief Parses the InfoChangeStream to extract dynamic metadata packets.
+ *
+ * Nicolet files store changes in configuration (montage, sensors, sampling rates)
+ * as "packets" in a specific stream. Each packet has a GUID indicating its type.
+ */
+void read_nicolete_file::readDynamicPackets(std::ifstream &file) {
+    dynamicPackets.clear();
+    auto it = std::find_if(sections.begin(), sections.end(), [](const Tag& v) {
+        return v.IDStr == "InfoChangeStream";
+    });
+    if (it == sections.end()) return;
+
+    int infoIdx = (int)it->index;
+    auto idxIt = std::find_if(indices.begin(), indices.end(), [infoIdx](const Index& v) {
+        return v.sectionIdx == (unsigned long long)infoIdx;
+    });
+    if (idxIt == indices.end()) return;
+
+    unsigned long long offset = idxIt->offset;
+    int nrDynamicPackets = (int)(idxIt->sectionL / 48);
+    file.seekg(offset);
+
+    for (int i = 0; i < nrDynamicPackets; i++) {
+        DynamicPacket pkt;
+        pkt.offset = offset + i * 48;
+        std::vector<uint8_t> guidMixed(16);
+        file.read(reinterpret_cast<char*>(guidMixed.data()), 16);
+        // Correcting GUID byte order for display
+        std::vector<uint8_t> guidNonMixed{guidMixed.at(3), guidMixed.at(2), guidMixed.at(1), guidMixed.at(0),
+                    guidMixed.at(5), guidMixed.at(4), guidMixed.at(7), guidMixed.at(6),
+                    guidMixed.at(8), guidMixed.at(9), guidMixed.at(10), guidMixed.at(11),
+                    guidMixed.at(12), guidMixed.at(13), guidMixed.at(14), guidMixed.at(15)};
+        std::stringstream ss;
+        for (uint8_t v : guidNonMixed) ss << std::setfill('0') << std::setw(2) << std::hex << (int)v;
+        pkt.guid = ss.str();
+        for (char & c : pkt.guid) c = (char)toupper(c);
+        pkt.guidAsStr = formatGuid(pkt.guid);
+
+        file.read(reinterpret_cast<char *>(&pkt.date), 8);
+        file.read(reinterpret_cast<char *>(&pkt.datefrac), 8);
+        file.read(reinterpret_cast<char *>(&pkt.internalOffsetStart), 8);
+        file.read(reinterpret_cast<char *>(&pkt.packetSize), 8);
+
+        // Find the actual data for this packet using the GUID as a tag.
+        // A dynamic packet stream (such as TSGUID) can span multiple Index blocks,
+        // so we treat all matching Index blocks as one contiguous logical stream.
+        auto tagIt = std::find_if(sections.begin(), sections.end(), [&](const Tag& v) {
+            return v.tag == pkt.guidAsStr;
+        });
+        if (tagIt != sections.end() && pkt.packetSize > 0) {
+            unsigned long long dIdx = (unsigned long long)tagIt->index;
+            pkt.data.clear();
+            pkt.data.reserve(pkt.packetSize);
+
+            std::streampos old = file.tellg();
+            unsigned long long internalOffset = 0;
+            unsigned long long remainingDataToRead = pkt.packetSize;
+            unsigned long long currentTargetStart = pkt.internalOffsetStart;
+
+            for (const auto& idxInst : indices) {
+                if (idxInst.sectionIdx != dIdx) continue;
+
+                if (internalOffset <= currentTargetStart &&
+                    (internalOffset + idxInst.sectionL) > currentTargetStart &&
+                    remainingDataToRead > 0) {
+
+                    unsigned long long startAt = currentTargetStart;
+                    unsigned long long stopAt = std::min(startAt + remainingDataToRead, internalOffset + idxInst.sectionL);
+                    unsigned long long readLength = stopAt - startAt;
+
+                    if (readLength > 0) {
+                        unsigned long long filePosStart = idxInst.offset + (startAt - internalOffset);
+                        size_t previousSize = pkt.data.size();
+                        pkt.data.resize(previousSize + readLength);
+
+                        file.clear();
+                        file.seekg(filePosStart);
+                        file.read(reinterpret_cast<char*>(pkt.data.data() + previousSize), readLength);
+
+                        remainingDataToRead -= readLength;
+                        currentTargetStart += readLength;
+                    }
+                }
+
+                internalOffset += idxInst.sectionL;
+                if (remainingDataToRead == 0) break;
+            }
+
+            file.clear();
+            file.seekg(old);
+        }
+
+        static std::map<std::string, std::string> gMap = {
+            {"BF7C95EF6C3B4E709E11779BFFF58EA7", "CHANNELGUID"},
+            {"8A19AA48BEA040D5B89F667FC578D635", "DERIVATIONGUID"},
+            {"F824D60C995E4D949578893C755ECB99", "FILTERGUID"},
+            {"0295036135BB4A229F0BC78AAA5DB094", "DISPLAYGUID"},
+            {"782B34E88E514BB997013227BB882A23", "ACCINFOGUID"},
+            {"A271CCCB515D4590B6A1DC170C8D6EE2", "TSGUID"},
+            {"D01B34A09DBD11D393D300500400C148", "AUDIOINFOGUID"}
+        };
+        pkt.IDStr = gMap.count(pkt.guid) ? gMap[pkt.guid] : "UNKNOWN";
+        dynamicPackets.push_back(pkt);
+    }
+}
+
+/**
+ * @brief Parses TimeSeries (TS) information from dynamic packets.
+ *
+ * This identifies the mapping between amplifier sensors and digital data streams,
+ * as well as critical values like sampling rates and resolution.
+ */
+void read_nicolete_file::readTSInfo() {
+    tsInfos.clear();
+    for (const auto& pkt : dynamicPackets) {
+        if (pkt.IDStr == "TSGUID" && pkt.data.size() >= 761) {
+            const uint8_t* d = pkt.data.data();
+            uint32_t elems = *reinterpret_cast<const uint32_t*>(d + 752);
+            std::vector<ChannelInfo> info;
+            size_t off = 760;
+            for (uint32_t i = 0; i < elems; i++) {
+                if (off + 552 > pkt.data.size()) break;
+                ChannelInfo ci;
+                // Label (64 uint16_t characters) - 128 bytes
+                std::vector<wchar_t> labelW(TSLABELSIZE + 1, 0);
+                std::memcpy(labelW.data(), d + off, TSLABELSIZE * 2);
+                ci.label = QString::fromWCharArray(labelW.data()).trimmed();
+                
+                size_t iOff = TSLABELSIZE * 2; // 128 bytes skip
+                // Active Sensor (32 uint16_t characters) - 64 bytes
+                std::vector<wchar_t> actW(LABELSIZE + 1, 0);
+                std::memcpy(actW.data(), d + off + iOff, LABELSIZE * 2);
+                ci.activeSensor = QString::fromWCharArray(actW.data()).trimmed();
+                iOff += TSLABELSIZE; // Skip 64 bytes total for active sensor block
+
+                // Ref Sensor (4 uint16_t characters) - 8 bytes
+                std::vector<wchar_t> refW(5, 0);
+                std::memcpy(refW.data(), d + off + iOff, 8);
+                ci.refSensor = QString::fromWCharArray(refW.data()).trimmed();
+                iOff += 64; // Correctly align to next metadata block (filtering/sampling)
+
+                ci.dLowCut = *reinterpret_cast<const double*>(d + off + iOff);
+                iOff += 8;
+                ci.dHighCut = *reinterpret_cast<const double*>(d + off + iOff);
+                iOff += 8;
+                ci.dSamplingRate = *reinterpret_cast<const double*>(d + off + iOff);
+                iOff += 8;
+                ci.dResolution = *reinterpret_cast<const double*>(d + off + iOff);
+                iOff += 8;
+                iOff += 4; // bMark (uint32 flag)
+                iOff += 4; // bNotch (uint32 flag)
+                ci.dEegOffset = *reinterpret_cast<const double*>(d + off + iOff);
+                ci.bOn = true;
+
+                // Match this channel metadata to its corresponding data stream (tag "0", "1", "2"...)
+                std::string tagStr = std::to_string(i);
+                auto tIt = std::find_if(sections.begin(), sections.end(), [&](const Tag& v) {
+                    return v.tag == tagStr;
+                });
+                ci.sectionIdx = (tIt != sections.end()) ? (int)tIt->index : -1;
+
+                if (std::isfinite(ci.dSamplingRate) && ci.dSamplingRate > 0.0 && ci.dSamplingRate <= 100000.0) {
+                    info.push_back(ci);
+                }
+                off += 552; // Offset for next sensor metadata
+            }
+            if (!info.empty()) {
+                tsInfos.push_back(info);
+            }
+        }
+    }
+}
+
+/**
+ * @brief Parses Montage/Derivation information.
+ *
+ * Explains which sensors are combined (e.g. Fp1-A1) to form a display derivation.
+ */
+void read_nicolete_file::readMontage(std::ifstream &file) {
+    montage.clear();
+    auto it = std::find_if(sections.begin(), sections.end(), [](const Tag& v) {
+        return v.IDStr == "DERIVATIONGUID";
+    });
+    if (it == sections.end()) return;
+
+    int mIdx = (int)it->index;
+    auto idxIt = std::find_if(indices.begin(), indices.end(), [mIdx](const Index& v) {
+        return v.sectionIdx == (unsigned long long)mIdx;
+    });
+    if (idxIt == indices.end()) return;
+
+    file.seekg(idxIt->offset + 40);
+    file.seekg(64, std::ios::cur); // Skip derivation name
+    file.seekg(640, std::ios::cur); // Skip color table/reserved
+
+    uint32_t nD1, nD2;
+    file.read(reinterpret_cast<char*>(&nD1), 4);
+    file.read(reinterpret_cast<char*>(&nD2), 4);
+
+    for (uint32_t i = 0; i < nD1; i++) {
+        MontageEntry me;
+        std::vector<uint16_t> b64(64), b32_1(32), b32_2(32);
+        file.read(reinterpret_cast<char*>(b64.data()), 128);
+        me.derivationName = QString::fromWCharArray(reinterpret_cast<const wchar_t*>(b64.data()), 64).trimmed();
+        file.read(reinterpret_cast<char*>(b32_1.data()), 64);
+        me.signalName1 = QString::fromWCharArray(reinterpret_cast<const wchar_t*>(b32_1.data()), 32).trimmed();
+        file.read(reinterpret_cast<char*>(b32_2.data()), 64);
+        me.signalName2 = QString::fromWCharArray(reinterpret_cast<const wchar_t*>(b32_2.data()), 32).trimmed();
+        file.seekg(264, std::ios::cur); // Skip additional info
+        montage.push_back(me);
+    }
+}
+
+/**
+ * @brief Parses the "EVENTTYPEINFOGUID" section to extract dictionary of predefined events, e.g. Eyes Open, Eyes Closed.
+ * This packet is located just before the "Events" stream, there is 752 bytes buffer with some info, than every block has 1152 bytes
+ * Every block consist of event specific GUID, another GUID common for every event in dictionary, then long and short version of the same event label
+ */
+void read_nicolete_file::readEventDictionary(std::ifstream &file){
+    eventDictionary.clear();
+    auto it = std::find_if(sections.begin(), sections.end(), [](const Tag& v) { // first find the correct Tag
+        return v.IDStr == "EVENTTYPEINFOGUID";
+    });
+    if (it == sections.end()) return;
+
+    int mIdx = (int)it->index; // get the index from the Tag
+    auto idxIt = std::find_if(indices.begin(), indices.end(), [mIdx](const Index& v) { //find the correct row in indices where Tag.index = indices.sectionIdx (here 18)
+        return v.sectionIdx == (unsigned long long)mIdx;
+    });
+    if (idxIt == indices.end()) return;
+
+    file.seekg(idxIt->offset); // move the file reader to the position defined in indices.offset
+    // next guid is {B799F680-72A4-11D3-93D3-00500400C148}, should start at (idxIt->offset + idxIt->blockL) (here 262144)
+
+    // same pattern as in "DERIVATIONGUID"
+    file.seekg(40, std::ios::cur); // guid = 16 bytes + 8 bytes of max capacity (see lower) + 8 bytes empty
+    file.seekg(64, std::ios::cur); // empty
+    file.seekg(640, std::ios::cur); // empty
+
+    uint32_t active_blocks, max_blocks;
+    file.read(reinterpret_cast<char*>(&active_blocks), 4); // here 172 - number of blocks used
+    file.read(reinterpret_cast<char*>(&max_blocks),4); // here 337 - maximal number of blocks? eight bytes after guid are giving the number 388976 (total size of the chunk) and 388976/1152 = 337
+
+    // the annotations should start at offset + 752 bytes (40+64+640+8 = 752).
+
+    for (uint32_t i = 0; i < active_blocks; i++) {
+        std::vector<uint8_t> eGUID1(16); // Event specific GUID
+        std::vector<uint8_t> eGUID2(16); // Same for every event in dictionary
+        file.read(reinterpret_cast<char*>(eGUID1.data()), 16);
+        file.read(reinterpret_cast<char*>(eGUID2.data()), 16);
+        QString eGuidString1 = GetGuidFromBytes(eGUID1);
+        //qDebug() << eGuidString1;
+        //qDebug() << GetGuidFromBytes(eGUID2);
+        QString long_annot = readUint16toQString(256, file);
+        QString short_annot = readUint16toQString(67, file);
+        std::vector<QString> annots = {long_annot, short_annot};
+        //qDebug() << long_annot;
+        //qDebug() << short_annot;
+        file.seekg(474, std::ios::cur);
+        eventDictionary.insert({eGuidString1, annots});
+        //qDebug() << "==================================";
+    }
+
+    // length of one whole block = 1152 bytes = 16+16+512+134+474
+}
+
+/**
+ * @brief Parses the "Events" section to extract user annotations and system markers.
+ *
+ * Nicolet stores events as a sequential list of packets in the "Events" stream.
+ * Each packet contains a GUID, start/end OLE Automation dates, and optionally text.
+ * Improved by Adam Kalina 4/2026 - reading additional data from dictionary defined events, fixing bug where zero terminated string would not concat
+ */
+void read_nicolete_file::readAnnotationsInternal(std::ifstream &file) {
+    annotations.clear();
+    auto it = std::find_if(sections.begin(), sections.end(), [](const Tag& v) { return v.tag == "Events"; });
+    if (it == sections.end()) return;
+
+    int eIdx = (int)it->index;
+    auto idxIt = std::find_if(indices.begin(), indices.end(), [eIdx](const Index& v) { return v.sectionIdx == (unsigned long long)eIdx; });
+    if (idxIt == indices.end()) return;
+
+    unsigned long long base = idxIt->offset;
+    unsigned long long totalL = idxIt->sectionL;
+    file.seekg(base);
+
+    // Event packet header GUID
+    static const std::vector<uint8_t> ePktGUID = {0x80, 0xF6, 0x99, 0xB7, 0xA4, 0x72, 0xD3, 0x11, 0x93, 0xD3, 0x00, 0x50, 0x04, 0x00, 0xC1, 0x48}; //"EVENTGUID" {B799F680-72A4-11D3-93D3-00500400C148}
+    QDateTime epoch(QDate(1899, 12, 30), QTime(0, 0, 0));
+
+    unsigned long long curOff = base;
+    while (curOff + 272 <= base + totalL) {
+        std::vector<uint8_t> pGUID(16);
+        if (!file.read(reinterpret_cast<char*>(pGUID.data()), 16) || pGUID != ePktGUID) break; // this GUID is at the beggining of every packet for every annotation
+        uint64_t pLen;
+        file.read(reinterpret_cast<char*>(&pLen), 8); //len of current event
+        unsigned long long next = curOff + pLen; // beginning of the next event
+
+        file.seekg(8, std::ios::cur); // Skip internal event ID
+        double eDate, eFrac;
+        file.read(reinterpret_cast<char*>(&eDate), 8); //OLE 2.0 DateTime
+        file.read(reinterpret_cast<char*>(&eFrac), 8);
+        // Converting OLE double (days since 1899) to millisecond precision
+        QDateTime start = epoch.addMSecs((long long)(eDate * 86400000.0 + eFrac * 1000.0));
+        if (start.isDaylightTime()) start = start.addSecs(-3600);
+
+        double duration;
+        file.read(reinterpret_cast<char*>(&duration), 8);
+        QDateTime end = start.addMSecs(duration * 1000.0);
+
+        file.seekg(48, std::ios::cur); // Skip to user info
+        QString userName = readUint16toQString(12,file);
+
+        uint64_t eventStringLen;
+        file.read(reinterpret_cast<char*>(&eventStringLen), 8); // read 8 bytes that present the length of event string (including trailing nulls)
+        std::vector<uint8_t> gM(16);
+        file.read(reinterpret_cast<char*>(gM.data()), 16); // read GUID - determines if event is in dictionary or user defined
+
+        // Non-mixed GUID for comparison
+        QString eGUID = GetGuidFromBytes(gM);
+
+        Annotation an; an.start = start; an.end = end; an.system = false;
+        
+        std::cout << "Event Found: GUID=" << eGUID.toStdString() << " Start=" << start.toString("dd.MM.yyyy hh:mm:ss.zzz").toStdString() << " Duration=" << duration << "s";
+
+        // Check for specific Nicolet User/Seizure Event GUIDs
+        if (eGUID == "{A5A95612-A7F8-11CF-831A-0800091B5BDA}" || eGUID == "{A5A95646-A7F8-11CF-831A-0800091B5BDA}"){
+
+            an.system = false;
+            file.seekg(80 + 32, std::ios::cur); // skip Reserved4 + Label + Reserved5
+            if (eventStringLen > 0 && eventStringLen < 10000){
+                an.text = readUint16toQString(int(eventStringLen),file);
+            }
+            if (!userName.isEmpty() && !userName.contains("Nicolet", Qt::CaseInsensitive)){
+                an.text = userName + ": " + an.text;
+            }
+            std::cout << " [USER] Text=\"" << an.text.toLocal8Bit().constData() << "\"";
+        } else { // Standard Nicolet system event mapping - use the dictionary
+
+            // There is more data to read even in dictionary defined events
+            // So far 152 bytes were read since the eventguid -> pLen - 152 remains
+            file.seekg(16,std::ios::cur); // first 16 are empty
+            //QString aChannel = readUint16toQString(48,file); // this is probably the channel associated with the event, seems to occupy 96 bytes
+            file.seekg(96,std::ios::cur); // aChannel not used - skipping
+            QString addInfo = readUint16toQString((pLen-152-48)/2,file); // user note on dictionary defined event, e.g. Spike - ?, in system events verbose info on reamining recording space and TCP ping
+
+
+            // Use the dictionary
+            if (eventDictionary.count(eGUID)) {
+
+                an.text = eventDictionary[eGUID].at(0); // use the long version
+
+                if (an.text == ""){
+                    an.text = eventDictionary[eGUID].at(1); // when the long version is not defined, use the short one
+                }
+
+                if (an.text == "Hawk_Cmd_Log"){ // Hawk_Cmd_Log = store event? Triggered every 10 seconds - mark it as system event
+                    an.system = true;
+                }
+
+                if (!an.system){
+                    if (addInfo != ""){
+                        an.text = an.text + " - " + addInfo; // append the additional info only on non-system events
+                    }
+                }
+
+                std::cout << " " << an.text.toStdString() << "\"";
+            } else {
+                std::cout << " [UNKNOWN SYSTEM EVENT]";
+            }
+        }
+        std::cout << std::endl;
+
+        if (!an.text.isEmpty()){
+            annotations.push_back(an);
+        }
+        curOff = next;
+        file.seekg(curOff);
+    }
+}
+
+/**
+ * @brief Parses the "VIDEOSYNCGUID" section to extract video file mapping timestamps.
+ *
+ * Nicolet maps 15-minute video chunks directly to the EEG timeline.
+ * The structure stores OLE date doubles followed by a UTF-16 filename.
+ */
+void read_nicolete_file::readVideoAnnotations(std::ifstream &file) {
+    auto it = std::find_if(sections.begin(), sections.end(), [](const Tag& v) {
+        return v.IDStr == "VIDEOSYNCGUID" || v.IDStr == "{E11C4CBA-0753-4655-A1E9-2B2309D1545B}";
+    });
+    if (it == sections.end()) return;
+
+    int vIdx = (int)it->index;
+    for (const auto& idx : indices) {
+        if (idx.sectionIdx == (unsigned long long)vIdx) {
+            if (idx.sectionL == 0) continue; // Avoid passing a null buffer to file.read on empty blocks
+            file.clear();
+            file.seekg(idx.offset);
+            std::vector<uint8_t> data(idx.sectionL);
+            if (!file.read(reinterpret_cast<char*>(data.data()), idx.sectionL)) continue;
+
+            const uint8_t aviPattern[] = {0x2E, 0x00, 0x61, 0x00, 0x76, 0x00, 0x69, 0x00}; // ".avi" in UTF-16
+            auto searchIt = data.begin();
+            QDateTime epoch(QDate(1899, 12, 30), QTime(0, 0, 0));
+            QString lastVideoFilename = "";
+
+            while ((searchIt = std::search(searchIt, data.end(), std::begin(aviPattern), std::end(aviPattern))) != data.end()) {
+                size_t pos = std::distance(data.begin(), searchIt);
+                
+                size_t strStart = pos;
+                // Backtrack over UTF-16 ASCII characters (high byte is 0, low byte is printable)
+                while (strStart >= 2 && data[strStart - 1] == 0 && data[strStart - 2] >= 0x20 && data[strStart - 2] < 0x7F) {
+                    strStart -= 2;
+                }
+                
+                if (strStart >= 16) {
+                    double eDate, eFrac;
+                    std::memcpy(&eDate, &data[strStart - 16], 8);
+                    std::memcpy(&eFrac, &data[strStart - 8], 8);
+                    
+                    if (eDate > 10000.0 && eDate < 100000.0) { // basic validity check for typical OLE dates (1927-2173)
+                        size_t lenBytes = pos + 8 - strStart;
+                        std::vector<wchar_t> wName(lenBytes / 2);
+                        std::memcpy(wName.data(), &data[strStart], lenBytes);
+                        QString filename = QString::fromWCharArray(wName.data(), lenBytes / 2);
+                        
+                        if (filename != lastVideoFilename) {
+                            lastVideoFilename = filename;
+                            
+                            Annotation an;
+                            an.start = epoch.addMSecs((long long)(eDate * 86400000.0 + eFrac * 1000.0));
+                            if (an.start.isDaylightTime()) an.start = an.start.addSecs(-3600);
+                            an.end = an.start;
+                            an.system = true;
+                            an.text = "Video file: " + filename;
+                            annotations.push_back(an);
+                            
+                            std::cout << "Video Annotation Added: " << filename.toLocal8Bit().constData() << " Start=" << an.start.toString("dd.MM.yyyy hh:mm:ss.zzz").toStdString() << std::endl;
+                        }
+                    }
+                }
+                searchIt += 8;
+            }
+        }
+    }
+}
+
+void read_nicolete_file::reconstructTimeline() {
+    timeline.clear();
+    for (size_t i = 0; i < niconeHeader.segmentTimes.segmentStartTimes.size(); i++) {
+        TimelineSection sec;
+        sec.start = niconeHeader.segmentTimes.segmentStartTimes[i];
+        sec.durationSeconds = niconeHeader.segmentTimes.durations[i];
+        sec.end = sec.start.addMSecs(sec.durationSeconds * 1000.0);
+        // Mapping recording segment to the TS metadata active at that time
+        sec.tsInfoIdx = (i < tsInfos.size()) ? (int)i : (int)tsInfos.size() - 1;
+        timeline.push_back(sec);
+    }
+}
+
+/**
+ * @brief Identifies continuous recording segments and their start times.
+ */
 read_nicolete_file::SegmentTimes read_nicolete_file::readSegmentStartTimes(std::ifstream &file){
-
-    QDateTime beginning_of_epoch(QDate(1899, 12,30), QTime(0, 0, 0));
-    QDateTime record_start;
-
-    double dateOLE;
-    double duration;
-
-    SegmentTimes segmentTimes;
-
+    QDateTime epoch(QDate(1899, 12, 30), QTime(0, 0, 0));
+    SegmentTimes sT;
     Index Idx = getSectionIdx("SegmentStream");
-    //std::cout << Idx.offset << std::endl;
     file.seekg(Idx.offset);
-    int nrSegments = Idx.sectionL/152;
-
-    //std::cout << file.tellg() << std::endl;
-
-    //obj.segments = struct();
-
-    for(int i = 0; i < nrSegments; i++){
-        file.read(reinterpret_cast<char *>(&dateOLE), sizeof(dateOLE)); // number of days since 30.12.1899 (I think since that is what empty fields in patient info equal to)
-        //std::cout << "dateOLE: " << dateOLE << std::endl;
-        record_start = beginning_of_epoch.addSecs(3600*24*dateOLE);
-
-        if(record_start.isDaylightTime()){
-            record_start = record_start.addSecs(-3600); // not sure why this is not automatic
-        }
-
-        qDebug() << record_start.toString("dd.MM.yyyy hh:mm:ss");
-        file.seekg(8,std::ios_base::cur); //fseek(h, 8 , 'cof'); //16
-        file.read(reinterpret_cast<char *>(&duration), sizeof(duration));;//24
-        //std::wcout << "duration: " << duration << std::endl;
-
-        segmentTimes.segmentStartTimes.push_back(record_start);
-        segmentTimes.durations.push_back(duration);
-
-        file.seekg(128,std::ios_base::cur);// fseek(h, 128 , 'cof'); %152
+    int nr = (int)(Idx.sectionL/152);
+    for(int i = 0; i < nr; i++){
+        double dOLE;
+        file.read(reinterpret_cast<char *>(&dOLE), 8); // days since 30.12.1899
+        QDateTime rStart = epoch.addMSecs((long long)(dOLE * 86400000.0));
+        if(rStart.isDaylightTime()) rStart = rStart.addSecs(-3600);
+        qDebug() << "Segment " << i << " start: " << rStart.toString("dd.MM.yyyy hh:mm:ss.zzz");
+        file.seekg(8, std::ios_base::cur); // skip reserved
+        double dur;
+        file.read(reinterpret_cast<char *>(&dur), 8); // segment duration in seconds
+        sT.segmentStartTimes.push_back(rStart);
+        sT.durations.push_back(dur);
+        file.seekg(128, std::ios_base::cur); // skip to next segment block
     }
-
-    return segmentTimes;
+    return sT;
 }
 
-
+/**
+ * @brief General purpose reader for string properties in specific GUID streams.
+ */
 std::vector<QString> read_nicolete_file::readFileProperties(std::string sectionName, std::ifstream &file){
-    unsigned long long lSection;
-    unsigned long long nrValues;
-    unsigned long long nrBstr;
-    unsigned long long id;
-    double value;
-    double unix_time;
-    QString value_str;
-    std::vector<uint8_t> guid_vec(16);
-    std::vector<QString> output;
-
-    //    info = struct();
-
-    //    infoProps = { 'patientID', 'firstName','middleName','lastName',...
-    //        'altID','mothersMaidenName','DOB','DOD','street','sexID','phone',...
-    //        'notes','dominance','siteID','suffix','prefix','degree','apartment',...
-    //        'city','state','country','language','height','weight','race','religion',...
-    //        'maritalStatus'};
-
+    std::vector<unsigned char> g(16);
+    std::vector<QString> out(30, "unknown"); // Vector of size 30 with "unknown" as default
     Index Idx = getSectionIdx(sectionName);
+    if (Idx.offset == 0 && Idx.sectionL == 0) return out;
+
     file.seekg(Idx.offset);
-
-    file.read(reinterpret_cast<char *>(guid_vec.data()), 16*sizeof(uint8_t));
-    //    std::cout << "guid: " << std::endl;
-    //    for (const auto& i: guid_vec)
-    //        std::cout << int(i) << std::endl;
-    file.read(reinterpret_cast<char *>(&lSection), sizeof(lSection));
-    file.read(reinterpret_cast<char *>(&nrValues), sizeof(nrValues));
-    //       reserved = fread(h, 3, 'uint16'); %#ok<NASGU>
-    file.read(reinterpret_cast<char *>(&nrBstr), sizeof(nrBstr));
-
-
-    //    std::cout << "lSection: " << lSection << std::endl;
-    //    std::cout << "nrValues: " << nrValues << std::endl;
-    //    std::cout << "nrBstr: " << nrBstr << std::endl;
-
-    for(unsigned long long i = 0; i < nrValues; i++){
-        file.read(reinterpret_cast<char *>(&id), sizeof(id));
-        switch(id){
-        case 7:
-        case 8:
-            file.read(reinterpret_cast<char *>(&unix_time), sizeof(unix_time));
-            unix_time = unix_time*(3600*24) - 2209161600; // 2208988800; %8
-            //obj.segments(i).dateStr = datestr(unix_time/86400 + datenum(1970,1,1));
-            //value = datevec( obj.segments(i).dateStr );
-            //value = value([3 2 1]);
-            break;
-        case 23:
-        case 24:
-            file.read(reinterpret_cast<char *>(&value), sizeof(value));
-            break;
-        default:
-            value = 0;
-        }
-        //info.(infoProps{id}) = value;
-
-    }
-
-    std::vector<unsigned long long> strSetup(nrBstr*2);
-    file.read(reinterpret_cast<char*>(strSetup.data()), nrBstr*2*sizeof(uint64_t));
-
-    //    for (const auto& i: strSetup)
-    //        std::cout << i << std::endl;
-
-    for(unsigned long long i = 0; i < nrBstr*2; i ++){
-        //std::cout << "loop no: " << i << std::endl;
-        if ( i % 2 == 0 ){
-            id = strSetup.at(i);
-            //std::cout << "strSetup.at(i): " << strSetup.at(i) << std::endl;
-            //std::cout << "strSetup.at(i+1): " << strSetup.at(i+1) << std::endl;
-            value_str = readUint16toQString(strSetup.at(i+1)+1,file);
-            output.push_back(value_str);
-            qDebug() << "value_str: " << value_str;
-            //std::cout << "------------------" << std::endl;
-            //info.(infoProps{id}) = value_str;
+    file.read(reinterpret_cast<char *>(g.data()), 16);
+    unsigned long long lS, nV, nB;
+    file.read(reinterpret_cast<char *>(&lS), 8);
+    file.read(reinterpret_cast<char *>(&nV), 8);
+    file.read(reinterpret_cast<char *>(&nB), 8);
+    
+    // Read non-string values (dates and numbers)
+    for(unsigned long long i = 0; i < nV; i++){
+        unsigned long long id; double v = 0.0;
+        file.read(reinterpret_cast<char *>(&id), 8);
+        // id 7,8 are dates (DOB, DOD); 23,24 are doubles (height, weight)
+        if (id == 7 || id == 8 || id == 23 || id == 24) {
+            file.read(reinterpret_cast<char *>(&v), 8);
+            if ((id == 7 || id == 8) && v > 0.0 && id < out.size()) {
+                QDate dateVal = QDate(1899, 12, 30).addDays((qint64)std::round(v));
+                if (dateVal.isValid()) {
+                    out[id] = dateVal.toString("yyyy-MM-dd");
+                }
+            }
         }
     }
-
-    return output;
+    
+    // Read string layout (ID and length)
+    std::vector<unsigned long long> sS(nB*2);
+    if(nB == 0) return out;
+    file.read(reinterpret_cast<char*>(sS.data()), nB*2*8);
+    
+    for(unsigned long long i = 0; i < nB; i++){
+        unsigned long long id = sS.at(i*2);
+        QString val = readUint16toQString((int)sS.at(i*2+1)+1, file);
+        // out[id] is mapped based on the MATLAB infoProps specification
+        if (id < out.size()) {
+            out[id] = val;
+        }
+    }
+    return out;
 }
 
-read_nicolete_file::Index read_nicolete_file::getSectionIdx(std::string sectionName){
-
-    std::cout << sectionName << std::endl;
-
-    unsigned long long sectionIdx;
-    //unsigned long long offset;
-
-    auto it = std::find_if(sections.begin(), sections.end(),[&sectionName](const Tag& v) {
-        return v.IDStr == sectionName;
-    });
-
-    if (it != sections.end())
-    {
-        std::cout << "it: " << (*it).index << std::endl;
-        sectionIdx = (*it).index; // because the original is from MATLAB where indexing starts at 1
-    }
-
-    //std::cout << "sectionIdx: " << sectionIdx << std::endl;
-
-    auto id = std::find_if(indices.begin(), indices.end(),[&sectionIdx](const Index& id) {
-        return id.sectionIdx == sectionIdx;
-    });
-
-    if (id != indices.end())
-    {
-        std::cout << "id: " << (*id).offset << std::endl;
-    }
-    return (*id);
+/**
+ * @brief Helper to find the index entry for a given logical stream name.
+ */
+read_nicolete_file::Index read_nicolete_file::getSectionIdx(std::string sN){
+    auto it = std::find_if(sections.begin(), sections.end(), [&](const Tag& v) { return v.IDStr == sN; });
+    unsigned long long sIdx = (it != sections.end()) ? (int)it->index : 0;
+    auto id = std::find_if(indices.begin(), indices.end(), [&](const Index& v) { return v.sectionIdx == sIdx; });
+    return (id != indices.end()) ? *id : Index{0,0,0,0};
 }
 
 bool read_nicolete_file::is_digits(std::string& str){
-    for (char ch : str) {
-        if (!isdigit(ch)){
-            return false;
-        }
-    }
+    for (char ch : str) if (!isdigit(ch)) return false;
     return true;
 }
 
-std::string read_nicolete_file::hexVectorTostring(std::vector<uint8_t>& vec){
-    std::stringstream result;
-    for (const auto& v : vec)
-    {
-        result
-                << std::setfill('0') << std::setw(sizeof(v) * 2)
-                << std::hex << +v;
-    }
-    return result.str();
+std::string read_nicolete_file::formatGuid(const std::string& gS) {
+    if (gS.length() != 32) return "{}";
+    std::string u = gS; for (char &c : u) c = (char)toupper(c);
+    return "{" + u.substr(0, 8) + "-" + u.substr(8, 4) + "-" + u.substr(12, 4) + "-" + u.substr(16,4) + "-" + u.substr(20,12) + "}";
 }
 
-std::string read_nicolete_file::formatGuid(const std::string& guidStr) {
+QString read_nicolete_file::GetGuidFromBytes(std::vector<uint8_t> &GUID_mixed){
 
-    std::string upperStr = guidStr;
+    // Non-mixed GUID for comparison
+    std::vector<uint8_t> GUID_non_mixed{GUID_mixed.at(3), GUID_mixed.at(2), GUID_mixed.at(1), GUID_mixed.at(0), GUID_mixed.at(5), GUID_mixed.at(4), GUID_mixed.at(7), GUID_mixed.at(6), GUID_mixed.at(8), GUID_mixed.at(9), GUID_mixed.at(10), GUID_mixed.at(11), GUID_mixed.at(12), GUID_mixed.at(13), GUID_mixed.at(14), GUID_mixed.at(15)};
 
-    for (unsigned long long i = 0; i < guidStr.length(); i++) {
-        upperStr[i] = toupper(guidStr[i]);
+    std::stringstream ss;
+    ss << "{";
+    for(int k=0; k<16; k++) {
+        ss << std::setfill('0') << std::setw(2) << std::uppercase << std::hex << (int)GUID_non_mixed[k];
+        if(k==3 || k==5 || k==7 || k==9) ss << "-";
     }
+    ss << "}";
 
-    // D01B34A0-9DBD-11D3-93D3-00500400C148
-    if (guidStr.length() != 32) {
-        // GUID should be a 32-character hexadecimal string
-        return "{}";
-    }
-
-    // Insert hyphens at specific positions
-    std::string formattedGuid = "{" +
-            upperStr.substr(0, 8) + "-" +
-            upperStr.substr(8, 4) + "-" +
-            upperStr.substr(12, 4) + "-" +
-            upperStr.substr(16,4) + "-" +
-            upperStr.substr(20,12) + "}";
-    return formattedGuid;
+    QString guidQString = QString::fromStdString(ss.str());
+    return guidQString;
 }
 
+
+
+/**
+ * @brief Reads UTF-16 characters from file and returns a trimmed QString.
+ */
 QString read_nicolete_file::readUint16toQString(int size, std::ifstream &file){
-    // Read n uint16 values from the file
-    std::vector<wchar_t> uint16Values(size);
-    file.read(reinterpret_cast<char*>(uint16Values.data()), size * sizeof(uint16_t));
+    if (size <= 0) return QString();
+    std::vector<wchar_t> w(size + 1, 0);
+    file.read(reinterpret_cast<char*>(w.data()), size * 2);
+    return QString::fromWCharArray(w.data()).trimmed();
+}
 
-    //    for (const auto& i: uint16Values){
-    //        std::wcout << i << " = " << char(i) << std::endl;
-    //        //std::wcout << wchar_t(i) << std::endl;
-    //    }
+/**
+ * @brief Unified interface to open and parse a Nicolet NicOne recording.
+ */
+int read_nicolete_file::readNicOneFile(QFileInfo info) {
+    if (!info.exists()) return 1;
+    file_info = info;
+    std::ifstream file(info.absoluteFilePath().toLocal8Bit().constData(), std::ios::binary);
+    if (!file.is_open()) return 1;
+    read_nicolete_header(file);
+    file.close();
+    return 0;
+}
 
-    QString res = QString::fromWCharArray(uint16Values.data()); // this has proven to be the simples way
+/**
+ * @brief Exports the demultiplexed EEG signal data and annotations to EDF+ format.
+ *
+ * Logic Overview:
+ * 1. For each continuous recording segment in the file, a separate EDF part is created.
+ * 2. It performs "Chunked In-Memory" reading: instead of thousands of disk seeks, it reads large
+ *    contiguous file blocks covering 5 minutes across all channels, then demultiplexes in RAM.
+ * 3. Applies the resolution (uV per digital unit) extracted from TSInfo.
+ * 4. Filters and exports annotations based on the provided CLI flags.
+ */
+int read_nicolete_file::exportToEdf(QFileInfo infoEdf, bool exportSystemAnnotations, bool anonymize, bool export2ascii) {
+    if (timeline.empty()) {
+        std::cout << "ERROR: No recording segments found in timeline." << std::endl;
+        return 1;
+    }
 
-    //qDebug() << res;
-    // the rest of it is not needed since I use QString::fromWCharArray
-    //    // Convert uint16 values to characters
-    //    std::vector<wchar_t> charValues(uint16Values.begin(), uint16Values.end());
+    std::string fN, pC; std::vector<int> bD;
+    int gender = -1; // -1 = unknown, 1 = male, 0 = female (per edflib specification)
+    if (anonymize) { fN = "Anonymous"; pC = "X"; bD = {1901, 1, 1}; }
+    else {
+        // Patient fields: [4] is Surname, [2] is First Name, [5] is personal ID, [7] is DOB, [10] is sexID
+        fN = (niconeHeader.patientInfo.size() > 4) ? (niconeHeader.patientInfo[4] + " " + niconeHeader.patientInfo[2]).toLocal8Bit().constData() : "Unknown";
+        pC = (niconeHeader.patientInfo.size() > 5) ? niconeHeader.patientInfo[5].toStdString() : "X";
+        bD = birthDateFromID(pC);
+        gender = genderFromID(pC);
 
-    //    // Remove trailing white spaces
-    //    charValues.erase(std::find_if(charValues.rbegin(), charValues.rend(), [](int ch) {
-    //        return !std::isspace(ch);
-    //    }).base(), charValues.end());
+        // Fallback to PATIENTINFOGUID DOB (index 7) when personal ID does not match Czech "rodné číslo"
+        if (bD[0] == 0 && niconeHeader.patientInfo.size() > 7 && niconeHeader.patientInfo[7] != "unknown") {
+            QDate dob = QDate::fromString(niconeHeader.patientInfo[7], "yyyy-MM-dd");
+            if (dob.isValid()) {
+                bD = {dob.year(), dob.month(), dob.day()};
+            }
+        }
 
-    //    // Convert char values to std::string
-    //    std::string chars(charValues.begin(), charValues.end());
+        // Fallback to PATIENTINFOGUID sexID (index 10) when gender cannot be derived from "rodné číslo"
+        if (gender == -1 && niconeHeader.patientInfo.size() > 10 && niconeHeader.patientInfo[10] != "unknown") {
+            QString sexStr = niconeHeader.patientInfo[10].trimmed().toUpper();
+            if (sexStr == "M" || sexStr == "MALE" || sexStr == "{0ADD99E3-ACCA-11CF-9B9A-0800099E03CD}") {
+                gender = 1;
+            } else if (sexStr == "F" || sexStr == "FEMALE" || sexStr == "Z" || sexStr == "Ž" || sexStr == "{0ADD99E4-ACCA-11CF-9B9A-0800099E03CD}") {
+                gender = 0;
+            }
+        }
 
-    //    chars.erase(std::find(chars.begin(), chars.end(), '\0'), chars.end());
-    //    return chars;
-    return res;
+        std::cout << "patientCode: " << pC << std::endl;
+    }
+
+    std::ifstream file(file_info.absoluteFilePath().toLocal8Bit().constData(), std::ios::binary);
+    if (!file.is_open()) {
+        std::cout << "ERROR: Could not open source file for reading data." << std::endl;
+        return 1;
+    }
+
+    // Pre-group index blocks by their logical section index for faster lookup during demultiplexing
+    std::map<unsigned long long, std::vector<const Index*>> gI;
+    for (const auto& idx : indices) gI[idx.sectionIdx].push_back(&idx);
+
+    double segOffsetSeconds = 0.0; // Cumulative duration of previous segments in the continuous data stream
+
+    for (int i = 0; i < (int)timeline.size(); i++) {
+        const auto& sec = timeline[i];
+        if (sec.tsInfoIdx < 0 || sec.tsInfoIdx >= (int)tsInfos.size()) {
+            segOffsetSeconds += sec.durationSeconds;
+            continue;
+        }
+        
+        const auto& channels = tsInfos[sec.tsInfoIdx];
+        if (channels.empty()) {
+            segOffsetSeconds += sec.durationSeconds;
+            continue;
+        }
+        std::string oP = infoEdf.absoluteFilePath().toStdString();
+        // Append part number if there are multiple segments
+        if (timeline.size() > 1) {
+            size_t dot = oP.find_last_of(".");
+            if (dot != std::string::npos) oP.insert(dot, "_part_" + std::to_string(i + 1));
+            else oP += "_part_" + std::to_string(i + 1);
+        }
+
+        std::cout << "Exporting section " << (i + 1) << " (" << sec.durationSeconds << "s) to: " << oP << std::endl;
+
+        int hdl = edfopen_file_writeonly(oP.c_str(), EDFLIB_FILETYPE_EDFPLUS, (int)channels.size());
+        if (hdl < 0) {
+            std::cout << "ERROR: edfopen_file_writeonly failed with error " << hdl << std::endl;
+            return 1;
+        }
+
+        edf_set_patientname(hdl, fN.c_str());
+        edf_set_patientcode(hdl, pC.c_str());
+        if (bD[0] > 0) edf_set_birthdate(hdl, bD[0], bD[1], bD[2]);
+        if (gender == 0 || gender == 1) edf_set_gender(hdl, gender);
+        edf_set_equipment(hdl, "Nicolet");
+        edf_set_startdatetime(hdl, sec.start.date().year(), sec.start.date().month(), sec.start.date().day(),
+                              sec.start.time().hour(), sec.start.time().minute(), sec.start.time().second());
+
+        // Setup EDF channels
+        for (int ch = 0; ch < (int)channels.size(); ch++) {
+            const auto& ci = channels[ch];
+            QString label = ci.label;
+            // Map raw sensor names to user-defined montage labels if available
+            for (const auto& me : montage) {
+                if (me.signalName1 == ci.label || me.signalName1 == ci.activeSensor) {
+                    label = me.derivationName; break;
+                }
+            }
+
+            // Remove any trailing underscores from the channel label (e.g., "A1_" -> "A1")
+            label = label.trimmed();
+            while (label.endsWith('_')) {
+                label.chop(1);
+            }
+
+            // EDF Specification requires channel type prefixes
+            QString upperLabel = label.toUpper().trimmed();
+            if (!upperLabel.startsWith("EEG ") && !upperLabel.startsWith("ECG ")) {
+                if (upperLabel.contains("ECG") || upperLabel.contains("EKG")) {
+                    label = "ECG " + label;
+                } else {
+                    label = "EEG " + label;
+                }
+            }
+            edf_set_samplefrequency(hdl, ch, (int)std::round(ci.dSamplingRate));
+            edf_set_label(hdl, ch, label.toLocal8Bit().constData());
+            edf_set_physical_dimension(hdl, ch, "uV");
+            edf_set_digital_maximum(hdl, ch, 32767);
+            edf_set_digital_minimum(hdl, ch, -32768);
+            
+            double phys = 32767.0 * ci.dResolution;
+            if (std::abs(phys) < 0.0001) phys = 3276.7; // Fallback to standard EEG scale
+            edf_set_physical_maximum(hdl, ch, phys);
+            edf_set_physical_minimum(hdl, ch, -phys);
+        }
+
+        // Export data in time-based chunks to optimize Disk I/O
+        double expD = 0;
+        double totalFullSeconds = std::floor(sec.durationSeconds);
+        while (expD < totalFullSeconds - 0.001) {
+            double cD = std::min(300.0, totalFullSeconds - expD); // 5-minute chunk
+            unsigned long long minO = 0xFFFFFFFFFFFFFFFFULL, maxO = 0;
+            std::vector<std::vector<const Index*>> cC(channels.size());
+            std::vector<long long> cCStartSample(channels.size(), 0);
+            bool dataFound = false;
+
+            // Identify all file blocks needed for this time chunk across all active channels
+            for (int ch = 0; ch < (int)channels.size(); ch++) {
+                const auto& ci = channels[ch];
+                if (ci.sectionIdx < 0 || !gI.count((unsigned long long)ci.sectionIdx)) continue;
+                long long tS = (long long)std::floor((segOffsetSeconds + expD) * ci.dSamplingRate);
+                long long tE = (long long)std::ceil((segOffsetSeconds + expD + cD) * ci.dSamplingRate);
+                long long cS = 0;
+                for (const auto* idx : gI[(unsigned long long)ci.sectionIdx]) {
+                    long long bS = idx->sectionL / 2;
+                    if (cS + bS > tS && cS < tE) {
+                        if (cC[ch].empty()) {
+                            cCStartSample[ch] = cS;
+                        }
+                        cC[ch].push_back(idx);
+                        minO = std::min(minO, idx->offset);
+                        maxO = std::max(maxO, idx->offset + idx->sectionL);
+                        dataFound = true;
+                    }
+                    cS += bS; if (cS >= tE) break;
+                }
+            }
+
+            // Perform single contiguous read of the chunk
+            if (dataFound && maxO > minO) {
+                std::vector<int16_t> dBuf((maxO - minO) / 2);
+                file.clear(); file.seekg(minO); file.read(reinterpret_cast<char*>(dBuf.data()), maxO - minO);
+                
+                int fS = (int)std::floor(cD); // Process full seconds only
+                for (int s = 0; s < fS; s++) {
+                    for (int ch = 0; ch < (int)channels.size(); ch++) {
+                        const auto& ci = channels[ch];
+                        int fs = (int)std::round(ci.dSamplingRate);
+                        std::vector<double> pB(fs, 0.0); // EDF physical buffer
+                        long long sS = (long long)std::round((segOffsetSeconds + expD + s) * ci.dSamplingRate);
+                        long long bSS = cCStartSample[ch];
+                        int sEx = 0;
+                        
+                        // Extract demultiplexed samples from the in-memory block using the pre-filtered chunk blocks
+                        for (const auto* b : cC[ch]) {
+                            long long bSm = b->sectionL / 2;
+                            if (bSS + bSm > sS) {
+                                long long oIB = std::max(0LL, sS - bSS);
+                                long long tT = std::min((long long)fs - sEx, bSm - oIB);
+                                size_t bP = (b->offset - minO) / 2 + oIB;
+                                for (int k = 0; k < (int)tT; k++) pB[sEx + k] = (double)dBuf[bP + k] * ci.dResolution;
+                                sEx += (int)tT;
+                            }
+                            bSS += bSm; if (sEx >= fs) break;
+                        }
+                        edfwrite_physical_samples(hdl, pB.data());
+                    }
+                }
+                expD += fS;
+            } else expD += cD; // Skip empty periods
+        }
+
+        // Export Annotations for this segment
+        for (const auto& ann : annotations) {
+            if (!exportSystemAnnotations && ann.system) continue;
+            if (ann.start >= sec.start && ann.start <= sec.end) {
+                long long onset = sec.start.msecsTo(ann.start) * 10;
+                long long duration = ann.start.msecsTo(ann.end) * 10;
+                if (duration <= 0) duration = -1;
+                if (export2ascii) edfwrite_annotation_ascii(hdl, onset, duration, ann.text.toLocal8Bit().constData());
+                else edfwrite_annotation_utf8(hdl, onset, duration, ann.text.toUtf8().constData());
+            }
+        }
+        edfclose_file(hdl);
+        segOffsetSeconds += sec.durationSeconds;
+    }
+    file.close();
+    std::cout << "Export process completed." << std::endl;
+    return 0;
+}
+
+/**
+ * @brief Extracts patient birthdate from personal ID (Czech Rodné číslo).
+ * Returns {0, 0, 0} if the ID does not match the Czech personal ID format.
+ */
+std::vector<int> read_nicolete_file::birthDateFromID(std::string id) {
+    std::string cleanId = id;
+    cleanId.erase(std::remove(cleanId.begin(), cleanId.end(), '/'), cleanId.end());
+    if (cleanId.length() < 9 || cleanId.length() > 10 || !is_digits(cleanId)) {
+        return {0, 0, 0};
+    }
+    try {
+        int y = std::stoi(cleanId.substr(0, 2));
+        int m = std::stoi(cleanId.substr(2, 2));
+        int d = std::stoi(cleanId.substr(4, 2));
+        if (m > 70) m -= 70;      // Females with +70 in month (since 2004)
+        else if (m > 50) m -= 50; // Females have +50 in month
+        else if (m > 20) m -= 20; // Males with +20 in month (since 2004)
+
+        if (y < 54 && cleanId.length() >= 10) y += 2000;
+        else y += 1900;
+
+        if (!QDate::isValid(y, m, d)) {
+            return {0, 0, 0};
+        }
+        return {y, m, d};
+    } catch (...) {
+        return {0, 0, 0};
+    }
+}
+
+/**
+ * @brief Extracts patient gender from personal ID (Czech Rodné číslo).
+ * Returns 1 for male, 0 for female, or -1 if the ID does not match Czech Rodné číslo.
+ */
+int read_nicolete_file::genderFromID(std::string id) {
+    std::string cleanId = id;
+    cleanId.erase(std::remove(cleanId.begin(), cleanId.end(), '/'), cleanId.end());
+    if (cleanId.length() < 9 || cleanId.length() > 10 || !is_digits(cleanId)) {
+        return -1;
+    }
+    try {
+        int y = std::stoi(cleanId.substr(0, 2));
+        int m = std::stoi(cleanId.substr(2, 2));
+        int d = std::stoi(cleanId.substr(4, 2));
+
+        int gender = -1;
+        if (m > 70) {
+            m -= 70;
+            gender = 0; // Female
+        } else if (m > 50) {
+            m -= 50;
+            gender = 0; // Female
+        } else if (m > 20) {
+            m -= 20;
+            gender = 1; // Male
+        } else {
+            gender = 1; // Male
+        }
+
+        if (y < 54 && cleanId.length() >= 10) y += 2000;
+        else y += 1900;
+
+        if (!QDate::isValid(y, m, d)) {
+            return -1;
+        }
+        return gender;
+    } catch (...) {
+        return -1;
+    }
 }
