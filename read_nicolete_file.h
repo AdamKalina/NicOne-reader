@@ -140,6 +140,7 @@ public:
     QString GetGuidFromBytes(std::vector<uint8_t> &GUID);
 private:
     std::vector<int> birthDateFromID(std::string id);
+    int genderFromID(std::string id);
 };
 
 #endif // READ_NICOLETE_FILE_H

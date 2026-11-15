@@ -229,22 +229,53 @@ void read_nicolete_file::readDynamicPackets(std::ifstream &file) {
         file.read(reinterpret_cast<char *>(&pkt.internalOffsetStart), 8);
         file.read(reinterpret_cast<char *>(&pkt.packetSize), 8);
 
-        // Find the actual data for this packet using the GUID as a tag
+        // Find the actual data for this packet using the GUID as a tag.
+        // A dynamic packet stream (such as TSGUID) can span multiple Index blocks,
+        // so we treat all matching Index blocks as one contiguous logical stream.
         auto tagIt = std::find_if(sections.begin(), sections.end(), [&](const Tag& v) {
             return v.tag == pkt.guidAsStr;
         });
-        if (tagIt != sections.end()) {
-            int dIdx = (int)tagIt->index;
-            auto dIdxIt = std::find_if(indices.begin(), indices.end(), [dIdx](const Index& v) {
-                return v.sectionIdx == (unsigned long long)dIdx;
-            });
-            if (dIdxIt != indices.end()) {
-                pkt.data.resize(pkt.packetSize);
-                std::streampos old = file.tellg();
-                file.seekg(dIdxIt->offset + pkt.internalOffsetStart);
-                file.read(reinterpret_cast<char*>(pkt.data.data()), pkt.packetSize);
-                file.seekg(old);
+        if (tagIt != sections.end() && pkt.packetSize > 0) {
+            unsigned long long dIdx = (unsigned long long)tagIt->index;
+            pkt.data.clear();
+            pkt.data.reserve(pkt.packetSize);
+
+            std::streampos old = file.tellg();
+            unsigned long long internalOffset = 0;
+            unsigned long long remainingDataToRead = pkt.packetSize;
+            unsigned long long currentTargetStart = pkt.internalOffsetStart;
+
+            for (const auto& idxInst : indices) {
+                if (idxInst.sectionIdx != dIdx) continue;
+
+                if (internalOffset <= currentTargetStart &&
+                    (internalOffset + idxInst.sectionL) > currentTargetStart &&
+                    remainingDataToRead > 0) {
+
+                    unsigned long long startAt = currentTargetStart;
+                    unsigned long long stopAt = std::min(startAt + remainingDataToRead, internalOffset + idxInst.sectionL);
+                    unsigned long long readLength = stopAt - startAt;
+
+                    if (readLength > 0) {
+                        unsigned long long filePosStart = idxInst.offset + (startAt - internalOffset);
+                        size_t previousSize = pkt.data.size();
+                        pkt.data.resize(previousSize + readLength);
+
+                        file.clear();
+                        file.seekg(filePosStart);
+                        file.read(reinterpret_cast<char*>(pkt.data.data() + previousSize), readLength);
+
+                        remainingDataToRead -= readLength;
+                        currentTargetStart += readLength;
+                    }
+                }
+
+                internalOffset += idxInst.sectionL;
+                if (remainingDataToRead == 0) break;
             }
+
+            file.clear();
+            file.seekg(old);
         }
 
         static std::map<std::string, std::string> gMap = {
@@ -316,10 +347,14 @@ void read_nicolete_file::readTSInfo() {
                 });
                 ci.sectionIdx = (tIt != sections.end()) ? (int)tIt->index : -1;
 
-                info.push_back(ci);
+                if (std::isfinite(ci.dSamplingRate) && ci.dSamplingRate > 0.0 && ci.dSamplingRate <= 100000.0) {
+                    info.push_back(ci);
+                }
                 off += 552; // Offset for next sensor metadata
             }
-            tsInfos.push_back(info);
+            if (!info.empty()) {
+                tsInfos.push_back(info);
+            }
         }
     }
 }
@@ -547,6 +582,8 @@ void read_nicolete_file::readVideoAnnotations(std::ifstream &file) {
     int vIdx = (int)it->index;
     for (const auto& idx : indices) {
         if (idx.sectionIdx == (unsigned long long)vIdx) {
+            if (idx.sectionL == 0) continue; // Avoid passing a null buffer to file.read on empty blocks
+            file.clear();
             file.seekg(idx.offset);
             std::vector<uint8_t> data(idx.sectionL);
             if (!file.read(reinterpret_cast<char*>(data.data()), idx.sectionL)) continue;
@@ -642,6 +679,8 @@ std::vector<QString> read_nicolete_file::readFileProperties(std::string sectionN
     std::vector<unsigned char> g(16);
     std::vector<QString> out(30, "unknown"); // Vector of size 30 with "unknown" as default
     Index Idx = getSectionIdx(sectionName);
+    if (Idx.offset == 0 && Idx.sectionL == 0) return out;
+
     file.seekg(Idx.offset);
     file.read(reinterpret_cast<char *>(g.data()), 16);
     unsigned long long lS, nV, nB;
@@ -649,12 +688,20 @@ std::vector<QString> read_nicolete_file::readFileProperties(std::string sectionN
     file.read(reinterpret_cast<char *>(&nV), 8);
     file.read(reinterpret_cast<char *>(&nB), 8);
     
-    // Skip non-string values (dates and numbers)
+    // Read non-string values (dates and numbers)
     for(unsigned long long i = 0; i < nV; i++){
-        unsigned long long id; double v;
+        unsigned long long id; double v = 0.0;
         file.read(reinterpret_cast<char *>(&id), 8);
-        // id 7,8 are dates; 23,24 are doubles (e.g. weight)
-        if (id == 7 || id == 8 || id == 23 || id == 24) file.read(reinterpret_cast<char *>(&v), 8);
+        // id 7,8 are dates (DOB, DOD); 23,24 are doubles (height, weight)
+        if (id == 7 || id == 8 || id == 23 || id == 24) {
+            file.read(reinterpret_cast<char *>(&v), 8);
+            if ((id == 7 || id == 8) && v > 0.0 && id < out.size()) {
+                QDate dateVal = QDate(1899, 12, 30).addDays((qint64)std::round(v));
+                if (dateVal.isValid()) {
+                    out[id] = dateVal.toString("yyyy-MM-dd");
+                }
+            }
+        }
     }
     
     // Read string layout (ID and length)
@@ -664,8 +711,11 @@ std::vector<QString> read_nicolete_file::readFileProperties(std::string sectionN
     
     for(unsigned long long i = 0; i < nB; i++){
         unsigned long long id = sS.at(i*2);
+        QString val = readUint16toQString((int)sS.at(i*2+1)+1, file);
         // out[id] is mapped based on the MATLAB infoProps specification
-        out[id] = readUint16toQString((int)sS.at(i*2+1)+1, file);
+        if (id < out.size()) {
+            out[id] = val;
+        }
     }
     return out;
 }
@@ -714,7 +764,8 @@ QString read_nicolete_file::GetGuidFromBytes(std::vector<uint8_t> &GUID_mixed){
  * @brief Reads UTF-16 characters from file and returns a trimmed QString.
  */
 QString read_nicolete_file::readUint16toQString(int size, std::ifstream &file){
-    std::vector<wchar_t> w(size);
+    if (size <= 0) return QString();
+    std::vector<wchar_t> w(size + 1, 0);
     file.read(reinterpret_cast<char*>(w.data()), size * 2);
     return QString::fromWCharArray(w.data()).trimmed();
 }
@@ -749,12 +800,33 @@ int read_nicolete_file::exportToEdf(QFileInfo infoEdf, bool exportSystemAnnotati
     }
 
     std::string fN, pC; std::vector<int> bD;
+    int gender = -1; // -1 = unknown, 1 = male, 0 = female (per edflib specification)
     if (anonymize) { fN = "Anonymous"; pC = "X"; bD = {1901, 1, 1}; }
     else {
-        // Patient fields: [4] is Surname, [2] is First Name, [5] is personal ID
-        fN = (niconeHeader.patientInfo.size() >= 4) ? (niconeHeader.patientInfo[4] + " " + niconeHeader.patientInfo[2]).toLocal8Bit().constData() : "Unknown";
-        pC = (niconeHeader.patientInfo.size() >= 4) ? niconeHeader.patientInfo[5].toStdString() : "X";
+        // Patient fields: [4] is Surname, [2] is First Name, [5] is personal ID, [7] is DOB, [10] is sexID
+        fN = (niconeHeader.patientInfo.size() > 4) ? (niconeHeader.patientInfo[4] + " " + niconeHeader.patientInfo[2]).toLocal8Bit().constData() : "Unknown";
+        pC = (niconeHeader.patientInfo.size() > 5) ? niconeHeader.patientInfo[5].toStdString() : "X";
         bD = birthDateFromID(pC);
+        gender = genderFromID(pC);
+
+        // Fallback to PATIENTINFOGUID DOB (index 7) when personal ID does not match Czech "rodné číslo"
+        if (bD[0] == 0 && niconeHeader.patientInfo.size() > 7 && niconeHeader.patientInfo[7] != "unknown") {
+            QDate dob = QDate::fromString(niconeHeader.patientInfo[7], "yyyy-MM-dd");
+            if (dob.isValid()) {
+                bD = {dob.year(), dob.month(), dob.day()};
+            }
+        }
+
+        // Fallback to PATIENTINFOGUID sexID (index 10) when gender cannot be derived from "rodné číslo"
+        if (gender == -1 && niconeHeader.patientInfo.size() > 10 && niconeHeader.patientInfo[10] != "unknown") {
+            QString sexStr = niconeHeader.patientInfo[10].trimmed().toUpper();
+            if (sexStr == "M" || sexStr == "MALE" || sexStr == "{0ADD99E3-ACCA-11CF-9B9A-0800099E03CD}") {
+                gender = 1;
+            } else if (sexStr == "F" || sexStr == "FEMALE" || sexStr == "Z" || sexStr == "Ž" || sexStr == "{0ADD99E4-ACCA-11CF-9B9A-0800099E03CD}") {
+                gender = 0;
+            }
+        }
+
         std::cout << "patientCode: " << pC << std::endl;
     }
 
@@ -768,11 +840,20 @@ int read_nicolete_file::exportToEdf(QFileInfo infoEdf, bool exportSystemAnnotati
     std::map<unsigned long long, std::vector<const Index*>> gI;
     for (const auto& idx : indices) gI[idx.sectionIdx].push_back(&idx);
 
+    double segOffsetSeconds = 0.0; // Cumulative duration of previous segments in the continuous data stream
+
     for (int i = 0; i < (int)timeline.size(); i++) {
         const auto& sec = timeline[i];
-        if (sec.tsInfoIdx < 0 || sec.tsInfoIdx >= (int)tsInfos.size()) continue;
+        if (sec.tsInfoIdx < 0 || sec.tsInfoIdx >= (int)tsInfos.size()) {
+            segOffsetSeconds += sec.durationSeconds;
+            continue;
+        }
         
         const auto& channels = tsInfos[sec.tsInfoIdx];
+        if (channels.empty()) {
+            segOffsetSeconds += sec.durationSeconds;
+            continue;
+        }
         std::string oP = infoEdf.absoluteFilePath().toStdString();
         // Append part number if there are multiple segments
         if (timeline.size() > 1) {
@@ -792,6 +873,7 @@ int read_nicolete_file::exportToEdf(QFileInfo infoEdf, bool exportSystemAnnotati
         edf_set_patientname(hdl, fN.c_str());
         edf_set_patientcode(hdl, pC.c_str());
         if (bD[0] > 0) edf_set_birthdate(hdl, bD[0], bD[1], bD[2]);
+        if (gender == 0 || gender == 1) edf_set_gender(hdl, gender);
         edf_set_equipment(hdl, "Nicolet");
         edf_set_startdatetime(hdl, sec.start.date().year(), sec.start.date().month(), sec.start.date().day(),
                               sec.start.time().hour(), sec.start.time().minute(), sec.start.time().second());
@@ -805,6 +887,12 @@ int read_nicolete_file::exportToEdf(QFileInfo infoEdf, bool exportSystemAnnotati
                 if (me.signalName1 == ci.label || me.signalName1 == ci.activeSensor) {
                     label = me.derivationName; break;
                 }
+            }
+
+            // Remove any trailing underscores from the channel label (e.g., "A1_" -> "A1")
+            label = label.trimmed();
+            while (label.endsWith('_')) {
+                label.chop(1);
             }
 
             // EDF Specification requires channel type prefixes
@@ -830,22 +918,27 @@ int read_nicolete_file::exportToEdf(QFileInfo infoEdf, bool exportSystemAnnotati
 
         // Export data in time-based chunks to optimize Disk I/O
         double expD = 0;
-        while (expD < sec.durationSeconds - 0.001) {
-            double cD = std::min(300.0, sec.durationSeconds - expD); // 5-minute chunk
+        double totalFullSeconds = std::floor(sec.durationSeconds);
+        while (expD < totalFullSeconds - 0.001) {
+            double cD = std::min(300.0, totalFullSeconds - expD); // 5-minute chunk
             unsigned long long minO = 0xFFFFFFFFFFFFFFFFULL, maxO = 0;
             std::vector<std::vector<const Index*>> cC(channels.size());
+            std::vector<long long> cCStartSample(channels.size(), 0);
             bool dataFound = false;
 
             // Identify all file blocks needed for this time chunk across all active channels
             for (int ch = 0; ch < (int)channels.size(); ch++) {
                 const auto& ci = channels[ch];
                 if (ci.sectionIdx < 0 || !gI.count((unsigned long long)ci.sectionIdx)) continue;
-                long long tS = (long long)std::floor(expD * ci.dSamplingRate);
-                long long tE = (long long)std::ceil((expD + cD) * ci.dSamplingRate);
+                long long tS = (long long)std::floor((segOffsetSeconds + expD) * ci.dSamplingRate);
+                long long tE = (long long)std::ceil((segOffsetSeconds + expD + cD) * ci.dSamplingRate);
                 long long cS = 0;
                 for (const auto* idx : gI[(unsigned long long)ci.sectionIdx]) {
                     long long bS = idx->sectionL / 2;
                     if (cS + bS > tS && cS < tE) {
+                        if (cC[ch].empty()) {
+                            cCStartSample[ch] = cS;
+                        }
                         cC[ch].push_back(idx);
                         minO = std::min(minO, idx->offset);
                         maxO = std::max(maxO, idx->offset + idx->sectionL);
@@ -865,23 +958,22 @@ int read_nicolete_file::exportToEdf(QFileInfo infoEdf, bool exportSystemAnnotati
                     for (int ch = 0; ch < (int)channels.size(); ch++) {
                         const auto& ci = channels[ch];
                         int fs = (int)std::round(ci.dSamplingRate);
-                        std::vector<double> pB(fs); // EDF physical buffer
-                        long long sS = (long long)std::round((expD + s) * ci.dSamplingRate);
-                        long long bSS = 0; int sEx = 0;
+                        std::vector<double> pB(fs, 0.0); // EDF physical buffer
+                        long long sS = (long long)std::round((segOffsetSeconds + expD + s) * ci.dSamplingRate);
+                        long long bSS = cCStartSample[ch];
+                        int sEx = 0;
                         
-                        // Extract demultiplexed samples from the in-memory block
-                        if (gI.count((unsigned long long)ci.sectionIdx)) {
-                            for (const auto* b : gI[(unsigned long long)ci.sectionIdx]) {
-                                long long bSm = b->sectionL / 2;
-                                if (bSS + bSm > sS) {
-                                    long long oIB = std::max(0LL, sS - bSS);
-                                    long long tT = std::min((long long)fs - sEx, bSm - oIB);
-                                    size_t bP = (b->offset - minO) / 2 + oIB;
-                                    for (int k = 0; k < (int)tT; k++) pB[sEx + k] = (double)dBuf[bP + k] * ci.dResolution;
-                                    sEx += (int)tT;
-                                }
-                                bSS += bSm; if (sEx >= fs) break;
+                        // Extract demultiplexed samples from the in-memory block using the pre-filtered chunk blocks
+                        for (const auto* b : cC[ch]) {
+                            long long bSm = b->sectionL / 2;
+                            if (bSS + bSm > sS) {
+                                long long oIB = std::max(0LL, sS - bSS);
+                                long long tT = std::min((long long)fs - sEx, bSm - oIB);
+                                size_t bP = (b->offset - minO) / 2 + oIB;
+                                for (int k = 0; k < (int)tT; k++) pB[sEx + k] = (double)dBuf[bP + k] * ci.dResolution;
+                                sEx += (int)tT;
                             }
+                            bSS += bSm; if (sEx >= fs) break;
                         }
                         edfwrite_physical_samples(hdl, pB.data());
                     }
@@ -902,6 +994,7 @@ int read_nicolete_file::exportToEdf(QFileInfo infoEdf, bool exportSystemAnnotati
             }
         }
         edfclose_file(hdl);
+        segOffsetSeconds += sec.durationSeconds;
     }
     file.close();
     std::cout << "Export process completed." << std::endl;
@@ -910,13 +1003,71 @@ int read_nicolete_file::exportToEdf(QFileInfo infoEdf, bool exportSystemAnnotati
 
 /**
  * @brief Extracts patient birthdate from personal ID (Czech Rodné číslo).
+ * Returns {0, 0, 0} if the ID does not match the Czech personal ID format.
  */
 std::vector<int> read_nicolete_file::birthDateFromID(std::string id) {
-    if (id == "0" || id.length() < 6) return {0, 0, 0};
+    std::string cleanId = id;
+    cleanId.erase(std::remove(cleanId.begin(), cleanId.end(), '/'), cleanId.end());
+    if (cleanId.length() < 9 || cleanId.length() > 10 || !is_digits(cleanId)) {
+        return {0, 0, 0};
+    }
     try {
-        int y = std::stoi(id.substr(0, 2)), m = std::stoi(id.substr(2, 2)), d = std::stoi(id.substr(4, 2));
-        if (m > 12) m -= 50; // Females have +50 in month
-        if (y < 54 && id.length() >= 10) y += 2000; else y += 1900;
+        int y = std::stoi(cleanId.substr(0, 2));
+        int m = std::stoi(cleanId.substr(2, 2));
+        int d = std::stoi(cleanId.substr(4, 2));
+        if (m > 70) m -= 70;      // Females with +70 in month (since 2004)
+        else if (m > 50) m -= 50; // Females have +50 in month
+        else if (m > 20) m -= 20; // Males with +20 in month (since 2004)
+
+        if (y < 54 && cleanId.length() >= 10) y += 2000;
+        else y += 1900;
+
+        if (!QDate::isValid(y, m, d)) {
+            return {0, 0, 0};
+        }
         return {y, m, d};
-    } catch (...) { return {0, 0, 0}; }
+    } catch (...) {
+        return {0, 0, 0};
+    }
+}
+
+/**
+ * @brief Extracts patient gender from personal ID (Czech Rodné číslo).
+ * Returns 1 for male, 0 for female, or -1 if the ID does not match Czech Rodné číslo.
+ */
+int read_nicolete_file::genderFromID(std::string id) {
+    std::string cleanId = id;
+    cleanId.erase(std::remove(cleanId.begin(), cleanId.end(), '/'), cleanId.end());
+    if (cleanId.length() < 9 || cleanId.length() > 10 || !is_digits(cleanId)) {
+        return -1;
+    }
+    try {
+        int y = std::stoi(cleanId.substr(0, 2));
+        int m = std::stoi(cleanId.substr(2, 2));
+        int d = std::stoi(cleanId.substr(4, 2));
+
+        int gender = -1;
+        if (m > 70) {
+            m -= 70;
+            gender = 0; // Female
+        } else if (m > 50) {
+            m -= 50;
+            gender = 0; // Female
+        } else if (m > 20) {
+            m -= 20;
+            gender = 1; // Male
+        } else {
+            gender = 1; // Male
+        }
+
+        if (y < 54 && cleanId.length() >= 10) y += 2000;
+        else y += 1900;
+
+        if (!QDate::isValid(y, m, d)) {
+            return -1;
+        }
+        return gender;
+    } catch (...) {
+        return -1;
+    }
 }
