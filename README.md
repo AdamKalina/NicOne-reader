@@ -1,1 +1,1 @@
-C++ Qt CLI application for reading headers of NicoletOne EEG files. Based on MATLAB code published here https://github.com/ieeg-portal/Nicolet-Reader.
+C++ Qt CLI application for reading NicoletOne EEG files and exporting them in EDF. Based on MATLAB code published here https://github.com/ieeg-portal/Nicolet-Reader with some improvement in the reading events annotations.
